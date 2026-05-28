@@ -142,6 +142,20 @@ final class SkyViewModel {
     func select(objectID id: String) {
         if let match = resolvedObjects.first(where: { $0.id == id }) {
             selectedObject = match.object
+        } else if id.hasPrefix("constellation-") {
+            let constellationID = String(id.dropFirst("constellation-".count))
+            guard let match = resolvedConstellations.first(where: { $0.id == constellationID }) else { return }
+            selectedObject = CelestialObject(
+                id: id,
+                name: match.name,
+                type: .constellation,
+                subtitle: "Recognizable star pattern",
+                summary: match.summary,
+                facts: [
+                    "Line segments: \(match.lines.count)",
+                    "Anchor stars: \(match.anchorStarIds.count)"
+                ]
+            )
         }
     }
 

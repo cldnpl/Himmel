@@ -27,32 +27,17 @@ enum SkyNodeFactory {
     // MARK: - Stars
 
     static func makeStar(resolved: ResolvedSkyObject) -> SCNNode {
-        let container = SCNNode()
-        container.name = nodeNamePrefix + resolved.id
-        container.position = position(for: resolved.horizontal)
-        container.constraints = [billboard()]
-        container.renderingOrder = 10
-
         let mag = resolved.object.magnitude ?? 3.0
-        let size = starSize(forMagnitude: mag)
-        let tint = starTint(for: resolved.object)
-
-        let glowPlane = SCNPlane(width: CGFloat(size), height: CGFloat(size))
-        glowPlane.firstMaterial = makeAdditiveMaterial(
-            image: SpriteCache.starGlow(tint: tint, bright: mag < 1.2)
+        return ProceduralStarRenderer.makeStarNode(
+            for: resolved.object,
+            radius: mapStarVisualRadius,
+            nodeName: nodeNamePrefix + resolved.id,
+            position: position(for: resolved.horizontal),
+            segmentCount: 48,
+            includeHalo: mag < 2.4,
+            appliesClassificationScale: false,
+            hitTargetRadius: mapStarHitTargetRadius
         )
-        container.addChildNode(SCNNode(geometry: glowPlane))
-
-        // Label — only on brighter stars to keep the chart legible.
-        if mag < 3.6 {
-            let label = makeLabel(
-                text: resolved.object.name,
-                style: .star,
-                yOffset: -Float(size) * 0.65
-            )
-            container.addChildNode(label)
-        }
-        return container
     }
 
     // MARK: - Sun / Moon / planets
@@ -91,13 +76,7 @@ enum SkyNodeFactory {
             let spin = SCNAction.repeatForever(.rotateBy(x: 0, y: 0, z: .pi, duration: 36.0))
             container.runAction(spin)
         }
-
-        let label = makeLabel(
-            text: resolved.object.name,
-            style: resolved.object.type == .planet ? .planet : .body,
-            yOffset: -Float(size) * 0.7
-        )
-        container.addChildNode(label)
+        // Name labels are rendered by SkyLabelOverlayView (screen-space), not here.
         return container
     }
 
@@ -128,7 +107,7 @@ enum SkyNodeFactory {
         guard !indices.isEmpty else { return nil }
 
         let group = SCNNode()
-        group.name = "constellation:\(constellation.id)"
+        group.name = nodeNamePrefix + "constellation-\(constellation.id)"
 
         let lineGeom = SCNGeometry(
             sources: [SCNGeometrySource(vertices: vertices)],
@@ -145,20 +124,30 @@ enum SkyNodeFactory {
         let lineNode = SCNNode(geometry: lineGeom)
         lineNode.renderingOrder = -50
         group.addChildNode(lineNode)
-
-        if anchorCount > 0 {
-            let centroid = simd_normalize(anchorSum / anchorCount) * sphereRadius
-            let labelNode = makeLabel(
-                text: constellation.name.uppercased(),
-                style: .constellation,
-                yOffset: 0
-            )
-            labelNode.position = SCNVector3(centroid.x, centroid.y, centroid.z)
-            labelNode.constraints = [billboard()]
-            labelNode.renderingOrder = -40
-            group.addChildNode(labelNode)
-        }
+        // The constellation NAME is rendered by SkyLabelOverlayView at the
+        // centroid (computed separately by the coordinator), not as a 3D node.
         return group
+    }
+
+    /// Centroid direction (unit vector × radius) of a constellation's visible
+    /// asterism, used by the overlay to place the constellation name. Returns nil
+    /// if no segment is above the horizon.
+    static func constellationCentroid(
+        _ constellation: Constellation,
+        starPositions: [String: HorizontalCoordinate]
+    ) -> SIMD3<Float>? {
+        var sum = SIMD3<Float>(0, 0, 0)
+        var count: Float = 0
+        for segment in constellation.lines {
+            guard let a = starPositions[segment.starA],
+                  let b = starPositions[segment.starB] else { continue }
+            guard a.altitudeDegrees > -3 && b.altitudeDegrees > -3 else { continue }
+            sum += a.worldDirection
+            sum += b.worldDirection
+            count += 2
+        }
+        guard count > 0 else { return nil }
+        return simd_normalize(sum / count) * sphereRadius
     }
 
     // MARK: - Ground silhouette (Stellarium-style horizon)
@@ -328,6 +317,9 @@ enum SkyNodeFactory {
         return max(0.55, size)
     }
 
+    private static let mapStarVisualRadius: Float = 0.18
+    private static let mapStarHitTargetRadius: Float = 0.95
+
     private static func planetSize(for name: String) -> CGFloat {
         switch name {
         case "Jupiter": return 4.4
@@ -370,7 +362,15 @@ enum SkyNodeFactory {
 
     static func makeLabel(text: String, style: LabelStyle, yOffset: Float) -> SCNNode {
         let image = SpriteCache.label(text: text, style: style)
-        let scale: CGFloat = 1.0 / 60.0
+        // Scene-units per texture point, chosen per style so the visual hierarchy
+        // is: planets/bodies > constellations > stars. Smaller divisor = bigger.
+        let scale: CGFloat
+        switch style {
+        case .planet, .body:   scale = 1.0 / 42.0
+        case .constellation:   scale = 1.0 / 40.0
+        case .cardinal:        scale = 1.0 / 34.0
+        case .star:            scale = 1.0 / 54.0
+        }
         let plane = SCNPlane(
             width: image.size.width * scale,
             height: image.size.height * scale
@@ -378,9 +378,33 @@ enum SkyNodeFactory {
         plane.firstMaterial = makeAlphaMaterial(image: image)
         let node = SCNNode(geometry: plane)
         node.position = SCNVector3(0, yOffset, 0)
-        node.constraints = [billboard()]
-        node.renderingOrder = 80
+        node.constraints = [billboard()]      // ← always faces the camera (0,0,0)
+        node.renderingOrder = 80              // drawn after bodies → never occluded
         return node
+    }
+
+    /// Reusable labeling entry point. Attaches a billboarded name label to `node`,
+    /// placed just *below* the body, at a constant on-sphere size that is
+    /// INDEPENDENT of any scale applied to the body's visual (so a normalized
+    /// .usdz model can't shrink/blow up its own label).
+    ///
+    /// - Parameters:
+    ///   - node: the (unscaled) container the label is parented to.
+    ///   - text: the display name.
+    ///   - style: typography preset (.planet / .body / .star / .constellation / .cardinal).
+    ///   - bodyRadius: on-sphere radius of the body in scene units, used to offset
+    ///     the label clear of the model.
+    @discardableResult
+    static func addLabel(
+        to node: SCNNode,
+        text: String,
+        style: LabelStyle,
+        bodyRadius: Float = 0
+    ) -> SCNNode {
+        let yOffset = -(bodyRadius * 1.35 + 1.4)   // a constant gap under the body
+        let label = makeLabel(text: text, style: style, yOffset: yOffset)
+        node.addChildNode(label)
+        return label
     }
 }
 
@@ -599,42 +623,50 @@ private enum SpriteCache {
         shadow.shadowBlurRadius = 4
         shadow.shadowOffset = CGSize(width: 0, height: 0)
         let attrs: [NSAttributedString.Key: Any]
+        // `pill` = draw a semi-transparent rounded background behind the text so
+        // bright bodies' names stay legible over the busy 8K starfield.
+        let pill: Bool
         switch style {
         case .star:
             attrs = [
-                .font: UIFont.systemFont(ofSize: 22, weight: .regular),
-                .foregroundColor: UIColor(white: 0.92, alpha: 0.95),
+                .font: UIFont.systemFont(ofSize: 26, weight: .medium),
+                .foregroundColor: UIColor(white: 0.94, alpha: 0.95),
                 .shadow: shadow,
                 .kern: 0.4
             ]
+            pill = false
         case .planet:
             attrs = [
-                .font: UIFont.systemFont(ofSize: 30, weight: .semibold),
-                .foregroundColor: UIColor(red: 1.0, green: 0.95, blue: 0.85, alpha: 1.0),
+                .font: UIFont.systemFont(ofSize: 40, weight: .semibold),
+                .foregroundColor: UIColor(red: 1.0, green: 0.96, blue: 0.88, alpha: 1.0),
                 .shadow: shadow,
                 .kern: 0.6
             ]
+            pill = true
         case .body:
             attrs = [
-                .font: UIFont.systemFont(ofSize: 30, weight: .semibold),
+                .font: UIFont.systemFont(ofSize: 40, weight: .semibold),
                 .foregroundColor: UIColor(white: 1.0, alpha: 1.0),
                 .shadow: shadow,
                 .kern: 0.6
             ]
+            pill = true
         case .constellation:
             attrs = [
-                .font: UIFont.systemFont(ofSize: 28, weight: .light),
-                .foregroundColor: UIColor(red: 0.78, green: 0.88, blue: 1.0, alpha: 0.85),
+                .font: UIFont.systemFont(ofSize: 30, weight: .light),
+                .foregroundColor: UIColor(red: 0.80, green: 0.90, blue: 1.0, alpha: 0.88),
                 .shadow: shadow,
-                .kern: 2.6
+                .kern: 3.0
             ]
+            pill = false
         case .cardinal:
             attrs = [
-                .font: UIFont.systemFont(ofSize: 40, weight: .bold),
+                .font: UIFont.systemFont(ofSize: 44, weight: .bold),
                 .foregroundColor: UIColor(red: 0.95, green: 0.55, blue: 0.45, alpha: 0.95),
                 .shadow: shadow,
                 .kern: 1.0
             ]
+            pill = false
         }
         let attributed = NSAttributedString(string: text, attributes: attrs)
         let bounds = attributed.boundingRect(
@@ -642,14 +674,22 @@ private enum SpriteCache {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         )
-        let pad: CGFloat = 14
+        let padX: CGFloat = pill ? 26 : 16
+        let padY: CGFloat = pill ? 14 : 12
         let size = CGSize(
-            width: ceil(bounds.width) + pad * 2,
-            height: ceil(bounds.height) + pad * 2
+            width: ceil(bounds.width) + padX * 2,
+            height: ceil(bounds.height) + padY * 2
         )
         let renderer = UIGraphicsImageRenderer(size: size)
-        let img = renderer.image { _ in
-            attributed.draw(at: CGPoint(x: pad, y: pad))
+        let img = renderer.image { ctx in
+            if pill {
+                // Rounded translucent backdrop to "lift" the name off the sky.
+                let rect = CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+                let path = UIBezierPath(roundedRect: rect, cornerRadius: size.height * 0.32)
+                UIColor(white: 0.0, alpha: 0.42).setFill()
+                path.fill()
+            }
+            attributed.draw(at: CGPoint(x: padX, y: padY))
         }
         cache.setObject(img, forKey: key)
         return img

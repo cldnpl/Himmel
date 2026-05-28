@@ -400,8 +400,10 @@
 				DEVELOPMENT_TEAM = H4M7KJL5DT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Himmel uses the camera only when you choose 'View in AR', to place a 3D model of the selected body in your room.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Himmel uses your location to compute the precise position of stars, planets and constellations above you.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Himmel uses motion data to align the celestial sphere with the direction your device is pointing.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Himmel saves AR snapshots to your photo library when you tap the shutter button.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -436,8 +438,10 @@
 				DEVELOPMENT_TEAM = H4M7KJL5DT;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Himmel uses the camera only when you choose 'View in AR', to place a 3D model of the selected body in your room.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Himmel uses your location to compute the precise position of stars, planets and constellations above you.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Himmel uses motion data to align the celestial sphere with the direction your device is pointing.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Himmel saves AR snapshots to your photo library when you tap the shutter button.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

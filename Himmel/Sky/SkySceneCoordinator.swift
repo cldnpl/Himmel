@@ -18,7 +18,24 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     let scnView: SCNView
 
     private let scene = SCNScene()
+
+    // ── Scene-graph hierarchy ───────────────────────────────────────────────
+    // scene.rootNode
+    //   ├─ cameraNode          (carries the global AR rotation from CoreMotion)
+    //   ├─ skyDome             (8K Stars+Milky Way background, static)
+    //   └─ skyRoot             (static celestial sphere container)
+    //        ├─ starsContainer          ← procedural sprite stars (UNCHANGED)
+    //        ├─ bodiesContainer         ← Sun (sprite) + planets/Moon (3D models)
+    //        └─ constellationsContainer ← asterism lines + names
+    //
+    // NB: the global "AR rotation" lives on the CAMERA, not the dome — the camera
+    // turns while the sphere stays put. This is equivalent to rotating the dome
+    // but avoids re-transforming the huge 8K mesh every frame.
     private let skyRoot = SCNNode()
+    private let starsContainer = SCNNode()
+    private let bodiesContainer = SCNNode()
+    private let constellationsContainer = SCNNode()
+
     /// Accessed from SceneKit's render thread inside `renderer(_:updateAtTime:)`.
     /// Created once in `init` and never reassigned, so unchecked access is safe.
     nonisolated(unsafe) private let cameraNode = SCNNode()
@@ -31,6 +48,9 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     private var bodyNodes: [String: SCNNode] = [:]
     private var constellationNodes: [String: SCNNode] = [:]
     private var selectionHaloNode: SCNNode?
+
+    /// Screen-space label layer (names projected from 3D, collision-resolved).
+    let labelOverlay = SkyLabelOverlayView()
 
     /// Directional light representing the real Sun; drives planet/Moon phases.
     private var sunLightNode: SCNNode?
@@ -59,8 +79,9 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         scnView.antialiasingMode = .none
         scnView.preferredFramesPerSecond = 60
         scnView.allowsCameraControl = false
-        scnView.rendersContinuously = true
+        scnView.rendersContinuously = true   // redraw every vsync with the latest camera
         scnView.delegate = self
+        scnView.isPlaying = true
 
         // Camera — wide field of view like Sky Guide's default.
         // zFar must exceed the SkyDome radius (140) so the dome isn't clipped.
@@ -68,6 +89,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         cam.fieldOfView = 75
         cam.zNear = 0.1
         cam.zFar = 400
+        ProceduralStarRenderer.configureBloom(on: cam, profile: .sky)
         cameraNode.camera = cam
         cameraNode.position = SCNVector3Zero
         scene.rootNode.addChildNode(cameraNode)
@@ -80,10 +102,14 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         scene.rootNode.addChildNode(SkyDome.make(texture: domeTexture(), rotationCCW: .pi / 2))
 
         scene.rootNode.addChildNode(skyRoot)
+        // Group children by kind so each layer is independently manageable.
+        skyRoot.addChildNode(constellationsContainer)
+        skyRoot.addChildNode(starsContainer)
+        skyRoot.addChildNode(bodiesContainer)
 
-        // Lighting. Only the textured 3D bodies react to this; the additive
-        // sprites and starfield are unlit (.constant), so this is harmless when
-        // no textures are bundled.
+        // Lighting. Only the textured 3D bodies / loaded models react to this; the
+        // additive sprites and starfield are unlit (.constant), so it's harmless
+        // for the procedural fallbacks.
         //  • Directional "sunlight" — aimed at the Sun's real direction each
         //    update, giving planets and the Moon physically correct phases.
         //  • A faint ambient so the night side isn't pure black.
@@ -103,10 +129,8 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         ambient.light = ambientLight
         scene.rootNode.addChildNode(ambient)
 
-        // Cardinal markers (N/E/S/W) — fixed to the world so they stay locked to
-        // the horizon. The ground/city silhouette is intentionally omitted: the
-        // sky fills the whole view.
-        scene.rootNode.addChildNode(SkyNodeFactory.makeCardinalMarkers())
+        // Cardinal markers (N/E/S/W) are rendered as screen-space labels by the
+        // overlay (see buildLabels). No 3D ground silhouette: sky fills the view.
 
         // Tap recognizer
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
@@ -125,24 +149,26 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     func stop() {
+        scnView.isPlaying = false
         motion.stop()
     }
 
-    // MARK: - Per-frame camera update
+    // MARK: - Renderer-frame update (camera + labels, locked together)
 
-    /// Called on SceneKit's render thread every frame. We set the camera
-    /// orientation here *synchronously* — dispatching to the main actor would
-    /// add a frame of latency and cause the visible stutter. A light
-    /// quaternion slerp smooths sensor jitter without adding lag.
-    nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        // 1. Raw device attitude (body→world) as a quaternion.
+    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        updateCameraAndLabelsForCurrentFrame()
+    }
+
+    private func updateCameraAndLabelsForCurrentFrame() {
+        // 1. Exact device attitude → camera orientation. NO slerp: smoothing only
+        //    added latency and made the camera trail the sensor. CMDeviceMotion is
+        //    already filtered, so the raw attitude is stable on its own.
         let attitude = simd_quatf(motion.currentTransform)
-        // 2. Apply the camera-mapping policy: invert (q⁻¹) so pitch/yaw track the
-        //    phone naturally instead of mirrored. See SkyCameraMotion for the math.
-        let target = SkyCameraMotion.cameraOrientation(for: attitude)
-        // 3. Slerp from the current orientation → anti-jitter, zero added lag.
-        let current = cameraNode.simdOrientation
-        cameraNode.simdOrientation = simd_slerp(current, target, 0.5)
+        cameraNode.simdOrientation = SkyCameraMotion.cameraOrientation(for: attitude)
+
+        // 2. Re-project every label THROUGH THE CAMERA WE JUST SET, this same
+        //    instant. Labels are now rigidly bound to their 3D anchor points.
+        labelOverlay.refresh()
     }
 
     // MARK: - Tap
@@ -203,6 +229,45 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                              starPositions: state.starPositions,
                              enabled: state.showConstellations)
         renderSelectionHalo(for: state.selectedObject, in: state.resolvedObjects)
+        labelOverlay.labels = buildLabels(state: state)
+    }
+
+    /// Collect everything that should carry a screen-space label. Star labels are
+    /// limited to brighter stars so the chart doesn't become a wall of text.
+    private func buildLabels(state: SkyViewModel) -> [SkyLabel] {
+        var out: [SkyLabel] = []
+
+        for obj in state.resolvedObjects {
+            let world = obj.horizontal.worldDirection * SkyNodeFactory.sphereRadius
+            switch obj.object.type {
+            case .star:
+                guard (obj.object.magnitude ?? 3.0) < 3.6 else { continue }
+                out.append(SkyLabel(id: "L-\(obj.id)", world: world, text: obj.object.name, kind: .star))
+            case .planet:
+                out.append(SkyLabel(id: "L-\(obj.id)", world: world, text: obj.object.name, kind: .planet))
+            case .sun, .moon:
+                out.append(SkyLabel(id: "L-\(obj.id)", world: world, text: obj.object.name, kind: .body))
+            default:
+                break
+            }
+        }
+
+        if state.showConstellations {
+            for c in state.resolvedConstellations {
+                if let centroid = SkyNodeFactory.constellationCentroid(c, starPositions: state.starPositions) {
+                    out.append(SkyLabel(id: "L-con-\(c.id)", world: centroid, text: c.name, kind: .constellation))
+                }
+            }
+        }
+
+        // Cardinal markers at the horizon.
+        for (name, az) in [("N", 0.0), ("E", 90.0), ("S", 180.0), ("W", 270.0)] {
+            let coord = HorizontalCoordinate(azimuthDegrees: az, altitudeDegrees: 2.0)
+            out.append(SkyLabel(id: "L-card-\(name)",
+                                world: coord.worldDirection * SkyNodeFactory.sphereRadius,
+                                text: name, kind: .cardinal))
+        }
+        return out
     }
 
     private func renderStars(_ resolved: [ResolvedSkyObject]) {
@@ -216,8 +281,9 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
             if let existing = starNodes[s.id] {
                 existing.position = SkyNodeFactory.position(for: s.horizontal)
             } else {
+                // Stars stay procedural sprites — no 3D model substitution.
                 let node = SkyNodeFactory.makeStar(resolved: s)
-                skyRoot.addChildNode(node)
+                starsContainer.addChildNode(node)
                 starNodes[s.id] = node
             }
         }
@@ -235,16 +301,16 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                 existing.position = SkyNodeFactory.position(for: b.horizontal)
             } else {
                 let node = makeBodyNode(b, moonPhase: moonPhase)
-                skyRoot.addChildNode(node)
+                bodiesContainer.addChildNode(node)
                 bodyNodes[b.id] = node
-                requestHeroModel(for: b)   // no-op unless a model is bundled
+                requestHeroModel(for: b)   // swaps in a bundled .usdz when available
             }
         }
         aimSunlight(using: resolved)
     }
 
-    /// Prefers a textured 3D sphere (Solar System Scope maps); falls back to the
-    /// additive sprite when no diffuse texture is bundled for this body.
+    /// Prefers the native Sun asset and textured 3D bodies for planets/Moon;
+    /// falls back to the additive sprite while async model loading completes.
     private func makeBodyNode(_ b: ResolvedSkyObject, moonPhase: MoonPhase.Snapshot) -> SCNNode {
         let radius = sphereRadius(for: b.object)
         if let textured = CelestialBodyFactory.texturedBody(
@@ -255,13 +321,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         ) {
             textured.position = SkyNodeFactory.position(for: b.horizontal)
             textured.renderingOrder = 50
-            // Name label beside the sphere (label keeps its own billboard).
-            let label = SkyNodeFactory.makeLabel(
-                text: b.object.name,
-                style: b.object.type == .planet ? .planet : .body,
-                yOffset: -Float(radius) * 1.6
-            )
-            textured.addChildNode(label)
+            // Name label handled by SkyLabelOverlayView (screen-space).
             return textured
         }
         // Fallback: existing sprite (already includes its label + Moon phase art).
@@ -300,40 +360,74 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         sunLightNode.look(at: SCNVector3Zero)
     }
 
-    /// Demonstrates the placeholder→model swap. If a bundled model named after
-    /// the body exists (e.g. "saturn.usdz" from Sketchfab), it is parsed off the
-    /// main actor and swapped in for the procedural placeholder. Otherwise nothing
-    /// happens and the placeholder stays.
+    /// Placeholder → 3D-model swap. A sprite shows instantly; meanwhile the
+    /// bundled `.usdz` named after the body (e.g. "Jupiter.usdz" in Models3D/) is
+    /// parsed OFF the main actor and swapped in when ready. If no model is bundled,
+    /// the placeholder remains.
     private func requestHeroModel(for b: ResolvedSkyObject) {
+        // The Sun, planets and Moon can use native bundled hero models. Distant
+        // catalog stars stay procedural and uniformly scaled for map clarity.
+        guard b.object.type == .sun || b.object.type == .planet || b.object.type == .moon else { return }
         guard !heroModelRequested.contains(b.id) else { return }
         heroModelRequested.insert(b.id)
-        let modelName = b.object.name.lowercased()
+
+        let modelName = b.object.name              // exact: "Jupiter", "Moon", …
         let nodeName = SkyNodeFactory.nodeNamePrefix + b.id
         let targetRadius = Float(sphereRadius(for: b.object))
+
+        let isSaturn = (modelName == "Saturn")
 
         Task { [weak self] in
             guard let model = await ModelLoader.shared.load(named: modelName) else { return }
             await MainActor.run {
                 guard let self, let placeholder = self.bodyNodes[b.id] else { return }
-                // Normalize arbitrary export scale to our on-sphere radius.
+
+                // ── Unscaled CONTAINER ──────────────────────────────────────
+                // Anchors the body on the sphere and carries the NAME (for tap
+                // hit-testing) and the LABEL. Because the container is never
+                // scaled, the label keeps a constant size no matter how much the
+                // .usdz had to be scaled to normalize its native units. (This was
+                // the bug making planet labels microscopic / huge.)
+                let container = SCNNode()
+                container.name = nodeName
+                container.position = placeholder.position
+
+                // Normalize the export's arbitrary scale so its largest dimension
+                // equals our intended on-sphere diameter (rings included).
                 let (minB, maxB) = model.boundingBox
                 let extent = max(maxB.x - minB.x, maxB.y - minB.y, maxB.z - minB.z)
                 if extent > 0 {
                     let s = (targetRadius * 2) / extent
                     model.scale = SCNVector3(s, s, s)
                 }
-                model.name = nodeName
-                model.position = placeholder.position
+                model.name = "visual"
                 model.renderingOrder = 50
-                let label = SkyNodeFactory.makeLabel(
-                    text: b.object.name,
-                    style: b.object.type == .planet ? .planet : .body,
-                    yOffset: -targetRadius * 1.6
-                )
-                model.addChildNode(label)
-                self.skyRoot.addChildNode(model)
+
+                if isSaturn {
+                    // ── Saturn re-alignment ─────────────────────────────────
+                    // facing → tilt → model. `facing` aims the model's −Z at the
+                    // camera (origin); the fixed `tilt` then opens the ring plane
+                    // into the iconic oblique pose; the model spins about its pole
+                    // INSIDE the tilt, so the rings stay put while the globe turns.
+                    let facing = SCNNode()
+                    let tilt = SCNNode()
+                    tilt.eulerAngles = SCNVector3(-Float.pi * 0.16, 0, 0) // ≈ −29° about local X
+                    model.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 140)))
+                    tilt.addChildNode(model)
+                    facing.addChildNode(tilt)
+                    container.addChildNode(facing)
+                    self.bodiesContainer.addChildNode(container)
+                    facing.look(at: SCNVector3Zero)   // −Z → camera at (0,0,0)
+                } else {
+                    // Other planets/Moon: a gentle spin about the polar (Y) axis.
+                    model.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 120)))
+                    container.addChildNode(model)
+                    self.bodiesContainer.addChildNode(container)
+                }
+
+                // Name label handled by SkyLabelOverlayView (screen-space).
                 placeholder.removeFromParentNode()
-                self.bodyNodes[b.id] = model
+                self.bodyNodes[b.id] = container
             }
         }
     }
@@ -355,7 +449,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         for c in constellations {
             constellationNodes[c.id]?.removeFromParentNode()
             if let node = SkyNodeFactory.makeConstellationGroup(c, starPositions: starPositions) {
-                skyRoot.addChildNode(node)
+                constellationsContainer.addChildNode(node)
                 constellationNodes[c.id] = node
             }
         }
