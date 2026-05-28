@@ -199,6 +199,8 @@ private struct BodyPreview: UIViewRepresentable {
     let object: CelestialObject
     let modelURL: URL?
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
         view.backgroundColor = .clear
@@ -206,62 +208,95 @@ private struct BodyPreview: UIViewRepresentable {
         view.antialiasingMode = .multisampling2X
         view.autoenablesDefaultLighting = true
         view.allowsCameraControl = true            // let the user spin it
-        view.scene = makeScene()
-        return view
-    }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {}
-
-    private func makeScene() -> SCNScene {
         let scene = SCNScene()
         scene.background.contents = UIColor.clear
 
-        let content = SCNNode()
+        // A spin node (rotates) with an inner node that holds the visual content.
+        // Framing/scale is applied to `inner` so the spin axis stays centred.
+        let spin = SCNNode()
+        spin.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 14)))
+        let inner = SCNNode()
+        spin.addChildNode(inner)
+        scene.rootNode.addChildNode(spin)
+
+        // INSTANT placeholder — drawn with zero disk I/O so presenting the sheet
+        // never blocks the main thread. Stars are fully procedural.
         if object.type == .star {
-            content.addChildNode(ProceduralStarRenderer.makeStarNode(
-                for: object,
-                radius: 1.2,
-                segmentCount: 64,
-                includeHalo: true
+            inner.addChildNode(ProceduralStarRenderer.makeStarNode(
+                for: object, radius: 1.2, segmentCount: 64, includeHalo: true
             ))
-        } else if let modelURL, let loaded = try? SCNScene(url: modelURL, options: [.convertToYUp: true]) {
-            for child in loaded.rootNode.childNodes { content.addChildNode(child) }
         } else {
-            content.addChildNode(makeGlowSphere(for: object))
+            inner.addChildNode(Self.makeGlowSphere(for: object))
         }
+        Self.frame(inner)
 
-        // Normalize size & center so any model frames identically.
-        let (minB, maxB) = content.boundingBox
-        let extent = max(maxB.x - minB.x, maxB.y - minB.y, maxB.z - minB.z)
-        if extent > 0 {
-            let s = 3.0 / extent
-            content.scale = SCNVector3(s, s, s)
-            let center = SCNVector3((minB.x + maxB.x) / 2 * s,
-                                    (minB.y + maxB.y) / 2 * s,
-                                    (minB.z + maxB.z) / 2 * s)
-            content.position = SCNVector3(-center.x, -center.y, -center.z)
-        }
-        content.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 14)))
-        scene.rootNode.addChildNode(content)
-
-        // Framing camera.
+        // Framing camera + soft key light.
         let cam = SCNNode()
         cam.camera = SCNCamera()
         ProceduralStarRenderer.configureBloom(on: cam.camera, profile: .preview)
         cam.position = SCNVector3(0, 0, 6)
         scene.rootNode.addChildNode(cam)
 
-        // A soft key light so unlit star spheres still read as 3D.
         let light = SCNNode()
         light.light = SCNLight()
         light.light?.type = .directional
         light.position = SCNVector3(3, 4, 6)
         scene.rootNode.addChildNode(light)
 
-        return scene
+        view.scene = scene
+        context.coordinator.innerNode = inner
+
+        // Heavy .usdz (Mars 12K, Mercury 8K, …) is parsed OFF the main thread via
+        // the shared cached ModelLoader, then swapped in for the placeholder once
+        // ready — so opening the sheet is instant and never freezes. Re-opening is
+        // free because the actor caches the parsed template.
+        if object.type != .star, modelURL != nil {
+            context.coordinator.loadModel(named: object.name)
+        }
+        return view
     }
 
-    private func makeGlowSphere(for object: CelestialObject) -> SCNNode {
+    func updateUIView(_ uiView: SCNView, context: Context) {}
+
+    // MARK: Async model swap
+
+    final class Coordinator {
+        weak var innerNode: SCNNode?
+        private var requested = false
+
+        func loadModel(named name: String) {
+            guard !requested else { return }
+            requested = true
+            Task { [weak self] in
+                guard let model = await ModelLoader.shared.load(named: name) else { return }
+                await MainActor.run {
+                    guard let inner = self?.innerNode else { return }
+                    inner.childNodes.forEach { $0.removeFromParentNode() }
+                    inner.addChildNode(model)
+                    BodyPreview.frame(inner)
+                }
+            }
+        }
+    }
+
+    // MARK: Helpers
+
+    /// Normalise + centre a node so any model frames identically in the viewport.
+    static func frame(_ node: SCNNode) {
+        node.scale = SCNVector3(1, 1, 1)
+        node.position = SCNVector3Zero
+        let (minB, maxB) = node.boundingBox
+        let extent = max(maxB.x - minB.x, maxB.y - minB.y, maxB.z - minB.z)
+        guard extent > 0 else { return }
+        let s = 3.0 / extent
+        node.scale = SCNVector3(s, s, s)
+        node.position = SCNVector3(-(minB.x + maxB.x) / 2 * s,
+                                   -(minB.y + maxB.y) / 2 * s,
+                                   -(minB.z + maxB.z) / 2 * s)
+    }
+
+    static func makeGlowSphere(for object: CelestialObject) -> SCNNode {
         let sphere = SCNSphere(radius: 1.2)
         let mat = SCNMaterial()
         let color: UIColor = object.type == .sun
@@ -273,7 +308,6 @@ private struct BodyPreview: UIViewRepresentable {
         sphere.firstMaterial = mat
         return SCNNode(geometry: sphere)
     }
-
 }
 
 #Preview {

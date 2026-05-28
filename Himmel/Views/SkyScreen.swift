@@ -11,6 +11,7 @@ import SwiftUI
 struct SkyScreen: View {
 
     @State private var viewModel = SkyViewModel()
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         ZStack {
@@ -18,13 +19,15 @@ struct SkyScreen: View {
                 || viewModel.locationService.status == .restricted {
                 PermissionGateView(status: viewModel.locationService.status)
             } else {
-                skyLayer
-                overlayLayer
+                skyExperience
             }
         }
         .background(Color.black)
         .onAppear { viewModel.start() }
         .onDisappear { viewModel.stop() }
+        .onChange(of: viewModel.navigationAcquisitionToken) { _, _ in
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        }
         .sheet(item: selectedObjectBinding) { obj in
             ObjectDetailSheet(object: obj)
                 .presentationDetents([.fraction(0.45), .large])
@@ -65,21 +68,49 @@ struct SkyScreen: View {
         .ignoresSafeArea()
     }
 
-    private var overlayLayer: some View {
-        VStack {
-            Spacer()
-            bottomControls
-                .padding(.bottom, 28)
-                .padding(.horizontal, 20)
-        }
-        .gesture(
-            DragGesture(minimumDistance: 24)
-                .onEnded { value in
-                    if value.translation.height > 80 && abs(value.translation.width) < 80 {
-                        viewModel.presentFeatured()
+    /// Immersive sky filling the WHOLE screen (ignores safe area), with the
+    /// floating controls pinned INSIDE the safe area via `safeAreaInset`, so the
+    /// search bar always lands below the status bar / Dynamic Island and stays
+    /// tappable — while the starfield still bleeds edge-to-edge behind it.
+    private var skyExperience: some View {
+        Color.clear
+            // Full-screen guidance arrows (non-interactive).
+            .overlay {
+                SkyGuidanceArrowOverlay(guidance: viewModel.navigationGuidance)
+            }
+            // Search bar docked in the TOP safe area.
+            .safeAreaInset(edge: .top) {
+                SkyNavigationSearchBar(
+                    text: $viewModel.navigationSearchText,
+                    errorMessage: viewModel.navigationSearchError,
+                    hasActiveTarget: viewModel.navigationTarget != nil,
+                    isFocused: $isSearchFocused,
+                    onSubmit: viewModel.submitNavigationSearch,
+                    onClear: {
+                        isSearchFocused = false
+                        viewModel.clearNavigationTarget()
                     }
-                }
-        )
+                )
+                .padding(.top, 6)
+            }
+            // Controls docked in the BOTTOM safe area.
+            .safeAreaInset(edge: .bottom) {
+                bottomControls
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 10)
+            }
+            // The starfield sits BEHIND everything and ignores the safe area.
+            .background {
+                skyLayer
+            }
+            .gesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        if value.translation.height > 80 && abs(value.translation.width) < 80 {
+                            viewModel.presentFeatured()
+                        }
+                    }
+            )
     }
 
     private var bottomControls: some View {

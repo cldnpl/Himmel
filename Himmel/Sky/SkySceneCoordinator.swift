@@ -39,6 +39,8 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     /// Accessed from SceneKit's render thread inside `renderer(_:updateAtTime:)`.
     /// Created once in `init` and never reassigned, so unchecked access is safe.
     nonisolated(unsafe) private let cameraNode = SCNNode()
+    /// Exposed so the label overlay can project through the exact same camera.
+    var cameraNodeForProjection: SCNNode { cameraNode }
     private let motion = MotionService()
 
     private weak var viewModel: SkyViewModel?
@@ -48,6 +50,10 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     private var bodyNodes: [String: SCNNode] = [:]
     private var constellationNodes: [String: SCNNode] = [:]
     private var selectionHaloNode: SCNNode?
+    private let navigationSolver = SkyNavigationSolver()
+    private var navigationTargetPositions: [String: SIMD3<Float>] = [:]
+    private var lastNavigationGuidance: SkyNavigationGuidance = .inactive
+    private var lastNavigationPublishTime: TimeInterval = 0
 
     /// Screen-space label layer (names projected from 3D, collision-resolved).
     let labelOverlay = SkyLabelOverlayView()
@@ -156,56 +162,124 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     // MARK: - Renderer-frame update (camera + labels, locked together)
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        updateCameraAndLabelsForCurrentFrame()
+        updateCameraAndLabelsForCurrentFrame(time: time)
     }
 
-    private func updateCameraAndLabelsForCurrentFrame() {
+    private func updateCameraAndLabelsForCurrentFrame(time: TimeInterval) {
         // 1. Exact device attitude → camera orientation. NO slerp: smoothing only
         //    added latency and made the camera trail the sensor. CMDeviceMotion is
         //    already filtered, so the raw attitude is stable on its own.
         let attitude = simd_quatf(motion.currentTransform)
         cameraNode.simdOrientation = SkyCameraMotion.cameraOrientation(for: attitude)
 
+        updateNavigationGuidanceForCurrentFrame(time: time)
+
         // 2. Re-project every label THROUGH THE CAMERA WE JUST SET, this same
         //    instant. Labels are now rigidly bound to their 3D anchor points.
         labelOverlay.refresh()
     }
 
+    private func updateNavigationGuidanceForCurrentFrame(time: TimeInterval) {
+        guard let viewModel,
+              let target = viewModel.navigationTarget,
+              let targetWorldPosition = navigationTargetPositions[target.id] else {
+            labelOverlay.highlightedLabelID = nil
+            if lastNavigationGuidance.isActive {
+                publishNavigationGuidanceIfNeeded(.inactive, time: time, force: true)
+            }
+            return
+        }
+
+        let guidance = navigationSolver.evaluate(
+            targetID: target.id,
+            targetName: target.name,
+            targetWorldPosition: targetWorldPosition,
+            cameraNode: cameraNode,
+            sceneView: scnView
+        )
+        labelOverlay.highlightedLabelID = guidance.isTargetVisible ? "L-\(target.id)" : nil
+        publishNavigationGuidanceIfNeeded(guidance, time: time)
+    }
+
+    private func publishNavigationGuidanceIfNeeded(
+        _ guidance: SkyNavigationGuidance,
+        time: TimeInterval,
+        force: Bool = false
+    ) {
+        guard force
+                || guidance.direction != lastNavigationGuidance.direction
+                || guidance.isTargetVisible != lastNavigationGuidance.isTargetVisible
+                || time - lastNavigationPublishTime >= 1.0 / 30.0 else { return }
+
+        lastNavigationGuidance = guidance
+        lastNavigationPublishTime = time
+        viewModel?.updateNavigationGuidance(guidance)
+    }
+
     // MARK: - Tap
 
+    // Touch-target cones (the "padding" that makes point-like bodies easy to tap).
+    // Planets/Sun/Moon get a wider cone than stars, and are tested FIRST so they
+    // always win when overlapping a star or constellation area.
+    private let bodyTapToleranceDegrees: Float = 7.0
+    private let starTapToleranceDegrees: Float = 4.0
+
+    /// Priority-ordered angular hit test. For objects that live on the celestial
+    /// sphere (effectively at infinity) a geometric bounding-box `hitTest` is the
+    /// wrong tool — a planet's mesh box is tiny and a constellation's line box is
+    /// huge, so the ray "misses" the planet and the chart feels unclickable.
+    /// Instead we measure the ANGLE between the tap ray and each body's direction
+    /// and pick the closest within a per-layer tolerance cone:
+    ///
+    ///   LAYER 1 — planets / Sun / Moon   (tested first, widest cone) → returns immediately
+    ///   LAYER 2 — individual stars       (tested only if no body matched)
+    ///   LAYER 3 — constellations         (never selectable — fully ignored)
     @objc private func handleTap(_ recognizer: UITapGestureRecognizer) {
         let point = recognizer.location(in: scnView)
-        let opts: [SCNHitTestOption: Any] = [
-            .boundingBoxOnly: true,
-            .ignoreHiddenNodes: true,
-            .searchMode: SCNHitTestSearchMode.all.rawValue
-        ]
-        let hits = scnView.hitTest(point, options: opts)
-        guard !hits.isEmpty else { return }
+        let ray = simd_normalize(rayDirection(at: point))
+        let cameraPos = cameraNode.simdWorldPosition
 
-        // Walk up to the celestial container node and pick the closest by angular dist.
-        let cameraPos = SIMD3<Float>(0, 0, 0)
-        let rayDir = rayDirection(at: point)
-        var best: (id: String, angle: Float)?
-
-        for hit in hits {
-            var node: SCNNode? = hit.node
-            while let n = node {
-                if let name = n.name, name.hasPrefix(SkyNodeFactory.nodeNamePrefix) {
-                    let id = String(name.dropFirst(SkyNodeFactory.nodeNamePrefix.count))
-                    let p = n.simdWorldPosition
-                    let toNode = simd_normalize(p - cameraPos)
-                    let cosA = simd_dot(simd_normalize(rayDir), toNode)
-                    let angle = acos(max(-1, min(1, cosA)))
-                    if best == nil || angle < best!.angle {
-                        best = (id, angle)
-                    }
-                    break
-                }
-                node = n.parent
-            }
+        // LAYER 1 — planets / Sun / Moon. If the ray lands inside a body's cone,
+        // select it and STOP: lower layers are never consulted.
+        if let id = closestNodeID(in: bodyNodes, toRay: ray, from: cameraPos,
+                                  toleranceDegrees: bodyTapToleranceDegrees) {
+            onSelect?(id)
+            return
         }
-        if let best { onSelect?(best.id) }
+
+        // LAYER 2 — individual stars (tighter cone).
+        if let id = closestNodeID(in: starNodes, toRay: ray, from: cameraPos,
+                                  toleranceDegrees: starTapToleranceDegrees) {
+            onSelect?(id)
+            return
+        }
+
+        // LAYER 3 — constellation lines/labels: intentionally NOT hit-tested.
+    }
+
+    /// Returns the id of the node whose world direction is closest to `ray`,
+    /// provided it lies within `toleranceDegrees` of it. Camera is at the sphere
+    /// centre, so each node's direction is `worldPosition − cameraPos`.
+    private func closestNodeID(
+        in nodes: [String: SCNNode],
+        toRay ray: SIMD3<Float>,
+        from cameraPos: SIMD3<Float>,
+        toleranceDegrees: Float
+    ) -> String? {
+        let tolerance = toleranceDegrees * .pi / 180
+        var best: (id: String, angle: Float)?
+        for (id, node) in nodes {
+            let delta = node.simdWorldPosition - cameraPos
+            guard simd_length(delta) > 0.0001 else { continue }
+            let toNode = simd_normalize(delta)
+            let cosA = simd_dot(ray, toNode)
+            // Must be in FRONT of the camera and inside the tolerance cone.
+            guard cosA > 0 else { continue }
+            let angle = acos(max(-1, min(1, cosA)))
+            guard angle <= tolerance else { continue }
+            if best == nil || angle < best!.angle { best = (id, angle) }
+        }
+        return best?.id
     }
 
     private func rayDirection(at point: CGPoint) -> SIMD3<Float> {
@@ -229,7 +303,16 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                              starPositions: state.starPositions,
                              enabled: state.showConstellations)
         renderSelectionHalo(for: state.selectedObject, in: state.resolvedObjects)
+        rebuildNavigationTargetPositions(state: state)
         labelOverlay.labels = buildLabels(state: state)
+
+        // State-driven highlight reset: the moment the navigation target is gone
+        // (the 'X' was tapped / search cleared), drop the highlight so a previous
+        // target's ring can't linger. `render(state:)` runs on this @Observable
+        // change, so the cleanup is bound directly to the search state.
+        if state.navigationTarget == nil {
+            labelOverlay.highlightedLabelID = nil
+        }
     }
 
     /// Collect everything that should carry a screen-space label. Star labels are
@@ -268,6 +351,56 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                                 text: name, kind: .cardinal))
         }
         return out
+    }
+
+    private func rebuildNavigationTargetPositions(state: SkyViewModel) {
+        var positions: [String: SIMD3<Float>] = [:]
+        positions.reserveCapacity(state.resolvedObjects.count + state.resolvedConstellations.count)
+
+        for object in state.resolvedObjects {
+            let p = SkyNodeFactory.position(for: object.horizontal)
+            positions[object.id] = SIMD3<Float>(p.x, p.y, p.z)
+        }
+
+        for constellation in state.resolvedConstellations {
+            guard let centroid = navigationCentroid(
+                for: constellation,
+                starPositions: state.starPositions
+            ) else { continue }
+            positions["constellation-\(constellation.id)"] = centroid
+        }
+
+        navigationTargetPositions = positions
+    }
+
+    private func navigationCentroid(
+        for constellation: Constellation,
+        starPositions: [String: HorizontalCoordinate]
+    ) -> SIMD3<Float>? {
+        var sum = SIMD3<Float>(0, 0, 0)
+        var count: Float = 0
+
+        for id in constellation.anchorStarIds {
+            guard let horizontal = starPositions[id] else { continue }
+            sum += horizontal.worldDirection
+            count += 1
+        }
+
+        if count == 0 {
+            for segment in constellation.lines {
+                if let a = starPositions[segment.starA] {
+                    sum += a.worldDirection
+                    count += 1
+                }
+                if let b = starPositions[segment.starB] {
+                    sum += b.worldDirection
+                    count += 1
+                }
+            }
+        }
+
+        guard count > 0 else { return nil }
+        return simd_normalize(sum / count) * SkyNodeFactory.sphereRadius
     }
 
     private func renderStars(_ resolved: [ResolvedSkyObject]) {
@@ -474,6 +607,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         var hasher = Hasher()
         hasher.combine(state.showConstellations)
         hasher.combine(state.selectedObject?.id ?? "")
+        hasher.combine(state.navigationTarget?.id ?? "")
         hasher.combine(Int(state.currentDate.timeIntervalSince1970 / 30))
         if let coord = state.locationService.coordinate {
             hasher.combine(Int(coord.latitude * 100))

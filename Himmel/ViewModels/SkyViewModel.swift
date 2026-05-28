@@ -31,6 +31,11 @@ final class SkyViewModel {
     var showLabels: Bool = false
     var selectedObject: CelestialObject?
     var isFeaturedSheetPresented: Bool = false
+    var navigationSearchText: String = ""
+    var navigationSearchError: String?
+    var navigationTarget: CelestialObject?
+    var navigationGuidance: SkyNavigationGuidance = .inactive
+    private(set) var navigationAcquisitionToken: Int = 0
 
     /// Always-current observer time. Updated by the periodic timer.
     private(set) var currentDate: Date = Date()
@@ -140,6 +145,14 @@ final class SkyViewModel {
     // MARK: - Selection
 
     func select(objectID id: String) {
+        // Tear down any active search-navigation guidance BEFORE the sheet opens,
+        // so the renderer stops solving directional angles / arrows for a target
+        // the user has just arrived at and tapped (prevents a render-loop race
+        // with the presentation transition). No-op when nothing is being tracked.
+        if navigationTarget != nil {
+            clearNavigationTarget()
+        }
+
         if let match = resolvedObjects.first(where: { $0.id == id }) {
             selectedObject = match.object
         } else if id.hasPrefix("constellation-") {
@@ -165,6 +178,117 @@ final class SkyViewModel {
 
     func presentFeatured() { isFeaturedSheetPresented = true }
     func dismissFeatured() { isFeaturedSheetPresented = false }
+
+    // MARK: - Navigation search
+
+    @discardableResult
+    func submitNavigationSearch() -> Bool {
+        let query = normalizedSearchString(navigationSearchText)
+        guard !query.isEmpty else {
+            navigationSearchError = nil
+            return false
+        }
+
+        guard let target = navigationCandidate(matching: query) else {
+            navigationSearchError = "Body not found"
+            return false
+        }
+
+        navigationTarget = target
+        navigationSearchText = target.name
+        navigationSearchError = nil
+        navigationGuidance = SkyNavigationGuidance(
+            targetID: target.id,
+            targetName: target.name,
+            direction: nil,
+            isTargetVisible: false,
+            angularDistanceDegrees: 180,
+            yawDegrees: 0,
+            pitchDegrees: 0,
+            intensity: 0.18
+        )
+        return true
+    }
+
+    func clearNavigationTarget() {
+        navigationTarget = nil
+        navigationSearchText = ""
+        navigationSearchError = nil
+        navigationGuidance = .inactive
+    }
+
+    func updateNavigationGuidance(_ guidance: SkyNavigationGuidance) {
+        guard navigationTarget?.id == guidance.targetID else { return }
+        let didAcquireTarget = guidance.isTargetVisible && !navigationGuidance.isTargetVisible
+        navigationGuidance = guidance
+        if didAcquireTarget {
+            navigationAcquisitionToken += 1
+        }
+    }
+
+    private func navigationCandidate(matching normalizedQuery: String) -> CelestialObject? {
+        let candidates = navigationCandidates()
+        if let exact = candidates.first(where: { $0.aliases.contains(normalizedQuery) }) {
+            return exact.object
+        }
+
+        let prefixMatches = candidates.filter { candidate in
+            candidate.aliases.contains { $0.hasPrefix(normalizedQuery) }
+        }
+        if prefixMatches.count == 1 { return prefixMatches[0].object }
+
+        return nil
+    }
+
+    private struct NavigationCandidate {
+        let object: CelestialObject
+        let aliases: Set<String>
+    }
+
+    private func navigationCandidates() -> [NavigationCandidate] {
+        var candidates: [NavigationCandidate] = []
+        candidates.reserveCapacity(resolvedObjects.count + resolvedConstellations.count)
+
+        for resolved in resolvedObjects {
+            var aliases: Set<String> = [
+                normalizedSearchString(resolved.object.name),
+                normalizedSearchString(resolved.object.id)
+            ]
+            if let designation = resolved.object.designation {
+                aliases.insert(normalizedSearchString(designation))
+            }
+            candidates.append(NavigationCandidate(object: resolved.object, aliases: aliases))
+        }
+
+        for constellation in resolvedConstellations {
+            let object = CelestialObject(
+                id: "constellation-\(constellation.id)",
+                name: constellation.name,
+                type: .constellation,
+                subtitle: "Recognizable star pattern",
+                summary: constellation.summary,
+                facts: [
+                    "Line segments: \(constellation.lines.count)",
+                    "Anchor stars: \(constellation.anchorStarIds.count)"
+                ]
+            )
+            candidates.append(NavigationCandidate(object: object, aliases: [
+                normalizedSearchString(constellation.name),
+                normalizedSearchString(constellation.id),
+                normalizedSearchString("constellation \(constellation.name)")
+            ]))
+        }
+
+        return candidates
+    }
+
+    private func normalizedSearchString(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
 
     // MARK: - Copy for Sun/Moon/planets
 

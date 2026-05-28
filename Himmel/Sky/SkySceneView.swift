@@ -37,6 +37,7 @@ struct SkySceneView: UIViewRepresentable {
         overlay.frame = container.bounds
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         overlay.sceneView = scn
+        overlay.cameraNode = coordinator.cameraNodeForProjection
         container.addSubview(overlay)
         // The overlay is refreshed by the coordinator's single per-frame clock.
 

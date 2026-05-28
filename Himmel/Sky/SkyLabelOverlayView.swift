@@ -62,10 +62,23 @@ final class SkyLabelOverlayView: UIView {
     /// The SCNView whose camera we project through.
     weak var sceneView: SCNView?
 
+    /// The camera node we project through. Projection is computed MANUALLY from
+    /// this node's world transform (set this very frame) rather than
+    /// `SCNView.projectPoint`, which samples the camera's *presentation* node —
+    /// i.e. the previously rendered frame. Reading the live model transform keeps
+    /// every label rigidly locked to its 3D anchor with zero one-frame drag.
+    weak var cameraNode: SCNNode?
+
     /// Source labels. Replaced wholesale whenever the sky recomputes (~30s),
     /// which (re)builds the reusable UILabel pool.
     var labels: [SkyLabel] = [] {
         didSet { rebuildPool() }
+    }
+    var highlightedLabelID: String? {
+        didSet {
+            guard highlightedLabelID != oldValue else { return }
+            restylePool()
+        }
     }
 
     private var pool: [String: PaddedLabel] = [:]
@@ -104,6 +117,14 @@ final class SkyLabelOverlayView: UIView {
         }
     }
 
+    private func restylePool() {
+        for item in labels {
+            guard let view = pool[item.id] else { continue }
+            style(view, for: item)
+            sizeCache[item.id] = view.sizeThatFits(CGSize(width: 400, height: 80))
+        }
+    }
+
     /// Fixed-point typography per kind, with a text drop-shadow and (for bright
     /// bodies) a translucent rounded pill so names lift off the dense Milky Way.
     private func style(_ label: PaddedLabel, for item: SkyLabel) {
@@ -112,8 +133,8 @@ final class SkyLabelOverlayView: UIView {
         shadow.shadowBlurRadius = 3
         shadow.shadowOffset = .zero
 
-        let font: UIFont
-        let color: UIColor
+        var font: UIFont
+        var color: UIColor
         var kern: CGFloat = 0.2
         var pill = false
         var text = item.text
@@ -140,6 +161,15 @@ final class SkyLabelOverlayView: UIView {
             text = item.text.uppercased()
         }
 
+        let isHighlighted = item.id == highlightedLabelID
+        if isHighlighted {
+            font = .systemFont(ofSize: max(font.pointSize, 16), weight: .bold)
+            color = .white
+            pill = true
+            kern = 0.2
+            text = item.text
+        }
+
         label.attributedText = NSAttributedString(string: text, attributes: [
             .font: font,
             .foregroundColor: color,
@@ -149,7 +179,9 @@ final class SkyLabelOverlayView: UIView {
         label.textAlignment = .center
         label.numberOfLines = 1
         if pill {
-            label.backgroundColor = UIColor(white: 0, alpha: 0.32)
+            label.backgroundColor = isHighlighted
+                ? UIColor(red: 0.20, green: 0.48, blue: 1.0, alpha: 0.42)
+                : UIColor(white: 0, alpha: 0.32)
             label.layer.cornerRadius = 9
             label.clipsToBounds = true
         } else {
@@ -157,6 +189,10 @@ final class SkyLabelOverlayView: UIView {
             label.layer.cornerRadius = 0
             label.clipsToBounds = false
         }
+        label.layer.borderWidth = isHighlighted ? 1 : 0
+        label.layer.borderColor = isHighlighted
+            ? UIColor.white.withAlphaComponent(0.8).cgColor
+            : UIColor.clear.cgColor
     }
 
     // MARK: - Per-frame layout
@@ -168,9 +204,38 @@ final class SkyLabelOverlayView: UIView {
         layoutLabels()
     }
 
+    /// Hard teardown: hide every pooled label immediately and drop the highlight.
+    /// Bound to search reset / navigation cancellation so no label can ghost on
+    /// the HUD after the high-frequency projection stops updating it.
+    func clearAllActiveLabels() {
+        highlightedLabelID = nil
+        hideAllPooledLabels()
+    }
+
+    private func hideAllPooledLabels() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (_, view) in pool { view.isHidden = true }
+        CATransaction.commit()
+    }
+
     private func layoutLabels() {
-        guard let scn = sceneView, !labels.isEmpty else { return }
+        // If there is nothing to project (no labels) or no camera yet, force-hide
+        // everything instead of returning early and leaving stale frames on screen.
+        guard let cam = cameraNode, let scnCam = cam.camera, !labels.isEmpty else {
+            hideAllPooledLabels()
+            return
+        }
         let viewBounds = bounds
+        let w = Float(viewBounds.width)
+        let h = Float(viewBounds.height)
+        guard w > 0, h > 0 else { return }
+
+        // Build the view-projection matrix from the camera's LIVE world transform
+        // (the one we set this same frame), so projection is locked to render.
+        let viewMatrix = simd_inverse(cam.simdWorldTransform)
+        let projMatrix = simd_float4x4(scnCam.projectionTransform(withViewportSize: viewBounds.size))
+        let viewProjection = projMatrix * viewMatrix
 
         // 1. PROJECT every label's 3D world position to 2D screen space, and note
         //    which are actually on-screen and in front of the camera.
@@ -180,10 +245,18 @@ final class SkyLabelOverlayView: UIView {
         var anchors: [CGPoint] = []   // all visible dot positions, to avoid covering them
 
         for item in labels {
-            let p = scn.projectPoint(SCNVector3(item.world.x, item.world.y, item.world.z))
-            // z ∈ [0,1] → in front of camera & within near/far. z > 1 (or < 0) → behind.
-            let inFront = p.z > 0 && p.z < 1
-            let anchor = CGPoint(x: CGFloat(p.x), y: CGFloat(p.y))
+            let clip = viewProjection * SIMD4<Float>(item.world.x, item.world.y, item.world.z, 1)
+            // clip.w > 0 ⇒ in front of the camera. Behind ⇒ skip (never drag a
+            // mirror-projected ghost across the screen).
+            let inFront = clip.w > 0.0001
+            var anchor = CGPoint(x: -10_000, y: -10_000)
+            if inFront {
+                let ndcX = clip.x / clip.w
+                let ndcY = clip.y / clip.w
+                let sx = (ndcX * 0.5 + 0.5) * w
+                let sy = (1 - (ndcY * 0.5 + 0.5)) * h   // flip Y → UIKit top-left
+                anchor = CGPoint(x: CGFloat(sx), y: CGFloat(sy))
+            }
             let onScreen = inFront
                 && viewBounds.insetBy(dx: -40, dy: -40).contains(anchor)
             projected.append(Projected(item: item, anchor: anchor, onScreen: onScreen))
@@ -202,6 +275,12 @@ final class SkyLabelOverlayView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
+        // BULLETPROOF: hide everything first; only labels that pass the frustum
+        // test AND win collision this frame get re-shown. A label can therefore
+        // never freeze/ghost — if it's not actively placed this exact frame, it's
+        // hidden, full stop.
+        for (_, view) in pool { view.isHidden = true }
+
         for entry in ordered {
             guard let view = pool[entry.item.id],
                   let size = sizeCache[entry.item.id] else { continue }
@@ -211,15 +290,14 @@ final class SkyLabelOverlayView: UIView {
             if let rect {
                 view.frame = rect
                 view.isHidden = false
+                // Keep the highlight border in sync EVERY frame so a previous
+                // target's ring can never linger after the target changes/clears.
+                view.layer.borderColor = (entry.item.id == highlightedLabelID)
+                    ? UIColor.white.withAlphaComponent(0.8).cgColor
+                    : UIColor.clear.cgColor
                 placed.append(rect.insetBy(dx: -2, dy: -2))   // padding between labels
                 shownIDs.insert(entry.item.id)
-            } else {
-                view.isHidden = true   // no collision-free slot → drop (priority yields)
             }
-        }
-        // Hide everything we didn't place (off-screen or behind camera).
-        for (id, view) in pool where !shownIDs.contains(id) {
-            view.isHidden = true
         }
 
         CATransaction.commit()
