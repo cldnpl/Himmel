@@ -2,7 +2,7 @@
 //  HimmelApp.swift
 //  Himmel
 //
-//  Created by Claudia Napolitano on 27.05.2026.
+//  AR night-sky app entry point.
 //
 
 import SwiftUI
@@ -12,6 +12,7 @@ struct HimmelApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(.dark)
         }
     }
 }
