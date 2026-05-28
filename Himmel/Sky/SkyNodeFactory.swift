@@ -21,7 +21,7 @@ enum SkyNodeFactory {
     static let nodeNamePrefix = "celestial:"
 
     enum LabelStyle {
-        case star, planet, body, constellation
+        case star, planet, body, constellation, cardinal
     }
 
     // MARK: - Stars
@@ -161,33 +161,108 @@ enum SkyNodeFactory {
         return group
     }
 
-    // MARK: - Background filler stars
+    // MARK: - Ground silhouette (Stellarium-style horizon)
 
-    static func makeBackgroundStars(count: Int = 600) -> SCNNode {
+    /// Builds the fixed ground as a *thin* silhouette band sitting on the horizon
+    /// (Stellarium-style), NOT a full black hemisphere: a low rolling treeline
+    /// rising a few degrees above the horizon, on top of a short dark skirt that
+    /// blends into the night background just below it.
+    static func makeGround() -> SCNNode {
+        let container = SCNNode()
+        container.name = "ground"
+        let R = sphereRadius * 0.92
+
+        // 1) Short dark skirt just below the horizon (z ∈ [-skirtH, 0]).
+        //    Only ~12° tall, so it reads as a slim base — not a black wall.
+        //    Its colour matches the background's lower band so the bottom edge
+        //    melts into the sky instead of forming a hard line.
+        let skirtH = sphereRadius * 0.20
+        let skirt = SCNCylinder(radius: CGFloat(R), height: CGFloat(skirtH))
+        skirt.radialSegmentCount = 96
+        let skirtMat = SCNMaterial()
+        skirtMat.diffuse.contents = UIColor(red: 0.006, green: 0.010, blue: 0.024, alpha: 1.0)
+        skirtMat.lightingModel = .constant
+        skirtMat.isDoubleSided = true
+        skirtMat.writesToDepthBuffer = false
+        skirtMat.readsFromDepthBuffer = false
+        skirt.firstMaterial = skirtMat
+        let skirtNode = SCNNode(geometry: skirt)
+        skirtNode.eulerAngles = SCNVector3(Float.pi / 2, 0, 0)   // axis local +Y → world +Z
+        skirtNode.position = SCNVector3(0, 0, -skirtH / 2)        // spans z ∈ [-skirtH, 0]
+        skirtNode.renderingOrder = 120
+        container.addChildNode(skirtNode)
+
+        // 2) Low rolling treeline silhouette rising just above the horizon.
+        let skyline = makeSkylineMesh(radius: R * 0.999, segments: 220)
+        skyline.renderingOrder = 121
+        container.addChildNode(skyline)
+
+        return container
+    }
+
+    /// A 360° low silhouette (treeline / distant hills) rising only a few degrees
+    /// above the horizon. Smooth, correlated heights from a few harmonics give an
+    /// organic edge instead of jagged blocks; occasional taller trees add accent.
+    private static func makeSkylineMesh(radius r: Float, segments: Int) -> SCNNode {
+        var vertices: [SCNVector3] = []
+        var indices: [Int32] = []
+        var seed: UInt64 = 0xBEEF_F00D_1234
+        let twoPi = 2 * Float.pi
+        var idx: Int32 = 0
+        let zBottom: Float = -0.25   // dip a touch below the horizon to meet the skirt
+
+        // Smooth rolling height (in scene units) from low-frequency harmonics.
+        // Max ≈ 2.2 units at radius ~46 → only ~2.7° tall: a slim silhouette.
+        func heightAt(_ a: Float) -> Float {
+            let rolling = 0.55
+                + 0.35 * sin(a * 6 + 0.5)
+                + 0.22 * sin(a * 11 + 1.7)
+                + 0.13 * sin(a * 19 + 4.1)
+            return max(0.18, rolling)
+        }
+
+        for i in 0..<segments {
+            let a0 = twoPi * Float(i) / Float(segments)
+            let a1 = twoPi * Float(i + 1) / Float(segments)
+            let mid = (a0 + a1) * 0.5
+            var h = heightAt(mid) * 1.4
+            // Rare taller tree for character.
+            if nextRandom(&seed) < 0.05 { h += Float(0.8 + nextRandom(&seed) * 1.2) }
+
+            let b0 = SCNVector3(r * cos(a0), r * sin(a0), zBottom)
+            let b1 = SCNVector3(r * cos(a1), r * sin(a1), zBottom)
+            let t1 = SCNVector3(r * cos(a1), r * sin(a1), h)
+            let t0 = SCNVector3(r * cos(a0), r * sin(a0), h)
+            vertices.append(contentsOf: [b0, b1, t1, t0])
+            indices.append(contentsOf: [idx, idx + 1, idx + 2, idx, idx + 2, idx + 3])
+            idx += 4
+        }
+
+        let geom = SCNGeometry(
+            sources: [SCNGeometrySource(vertices: vertices)],
+            elements: [SCNGeometryElement(indices: indices, primitiveType: .triangles)]
+        )
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor(red: 0.002, green: 0.004, blue: 0.012, alpha: 1.0)
+        mat.lightingModel = .constant
+        mat.isDoubleSided = true
+        mat.writesToDepthBuffer = false
+        mat.readsFromDepthBuffer = false
+        geom.firstMaterial = mat
+        return SCNNode(geometry: geom)
+    }
+
+    // MARK: - Cardinal markers (N / E / S / W)
+
+    static func makeCardinalMarkers() -> SCNNode {
         let parent = SCNNode()
-        var seed: UInt64 = 0xC0FF_EE_DE_AD_BE_EF
-        let sprite = SpriteCache.backgroundStar()
-        for _ in 0..<count {
-            let u = nextRandom(&seed)
-            let v = nextRandom(&seed)
-            let theta = 2.0 * Float.pi * Float(u)
-            let phi = acos(2.0 * Float(v) - 1.0)
-            let dir = SIMD3<Float>(
-                sin(phi) * cos(theta),
-                sin(phi) * sin(theta),
-                cos(phi)
-            )
-            let size = CGFloat(0.10 + 0.18 * Float(nextRandom(&seed)))
-            let plane = SCNPlane(width: size, height: size)
-            plane.firstMaterial = makeAdditiveMaterial(image: sprite)
-            let node = SCNNode(geometry: plane)
-            node.position = SCNVector3(
-                dir.x * sphereRadius * 0.99,
-                dir.y * sphereRadius * 0.99,
-                dir.z * sphereRadius * 0.99
-            )
-            node.constraints = [billboard()]
-            node.renderingOrder = -200
+        parent.name = "cardinals"
+        let points: [(String, Double)] = [("N", 0), ("E", 90), ("S", 180), ("W", 270)]
+        for (label, az) in points {
+            let coord = HorizontalCoordinate(azimuthDegrees: az, altitudeDegrees: 3.5)
+            let node = makeLabel(text: label, style: .cardinal, yOffset: 0)
+            node.position = position(for: coord)
+            node.renderingOrder = 140   // above the skyline so always visible
             parent.addChildNode(node)
         }
         return parent
@@ -552,6 +627,13 @@ private enum SpriteCache {
                 .foregroundColor: UIColor(red: 0.78, green: 0.88, blue: 1.0, alpha: 0.85),
                 .shadow: shadow,
                 .kern: 2.6
+            ]
+        case .cardinal:
+            attrs = [
+                .font: UIFont.systemFont(ofSize: 40, weight: .bold),
+                .foregroundColor: UIColor(red: 0.95, green: 0.55, blue: 0.45, alpha: 0.95),
+                .shadow: shadow,
+                .kern: 1.0
             ]
         }
         let attributed = NSAttributedString(string: text, attributes: attrs)

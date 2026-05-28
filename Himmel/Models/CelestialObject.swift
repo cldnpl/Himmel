@@ -53,6 +53,28 @@ struct EquatorialCoordinate: Hashable, Codable {
     var rightAscensionDegrees: Double { rightAscensionHours * 15.0 }
     var rightAscensionRadians: Double { rightAscensionDegrees * .pi / 180.0 }
     var declinationRadians: Double { declinationDegrees * .pi / 180.0 }
+
+    /// Direct conversion of equatorial coordinates to a unit Cartesian vector in
+    /// the (fixed) equatorial frame:
+    ///
+    ///     x = cos(δ) · cos(α)
+    ///     y = cos(δ) · sin(α)
+    ///     z = sin(δ)
+    ///
+    /// where α = right ascension and δ = declination.
+    ///
+    /// NOTE: This frame is *not* aligned with the observer's horizon. Himmel
+    /// renders a topocentric sky (what you actually see from your location at
+    /// this instant), so the production path is:
+    ///   RA/Dec ──AstronomicalMath.horizontal()──▶ Alt/Az ──worldDirection──▶ XYZ
+    /// Use this helper only if you want a location-independent "equatorial globe"
+    /// (e.g. an inset star-globe widget).
+    var equatorialUnitVector: SIMD3<Float> {
+        let ra = Float(rightAscensionRadians)
+        let dec = Float(declinationRadians)
+        let cosDec = cos(dec)
+        return SIMD3<Float>(cosDec * cos(ra), cosDec * sin(ra), sin(dec))
+    }
 }
 
 /// Topocentric (horizontal) coordinates for a specific observer + time.
@@ -66,9 +88,14 @@ struct HorizontalCoordinate: Hashable {
     var altitudeRadians: Double { altitudeDegrees * .pi / 180.0 }
 
     /// Unit direction vector in scene world space matching CoreMotion's
-    /// `xMagneticNorthZVertical` reference frame: +X = North, +Y = East, +Z = Up.
-    /// Az = 0  → (+1, 0, 0)
-    /// Az = 90 → (0, +1, 0)
+    /// `xMagneticNorthZVertical` reference frame, which is right-handed with
+    /// +X = North, +Y = West, +Z = Up.
+    ///
+    /// Azimuth is measured from North, increasing clockwise toward East, so the
+    /// East component is sin(az) and therefore the West (+Y) component is -sin(az).
+    /// Az = 0   (N) → (+1,  0, 0)
+    /// Az = 90  (E) → ( 0, -1, 0)
+    /// Az = 270 (W) → ( 0, +1, 0)
     /// Alt = 90 (zenith) → (0, 0, +1)
     var worldDirection: SIMD3<Float> {
         let alt = Float(altitudeRadians)
@@ -76,7 +103,7 @@ struct HorizontalCoordinate: Hashable {
         let cosAlt = cos(alt)
         return SIMD3<Float>(
             x: cos(az) * cosAlt,
-            y: sin(az) * cosAlt,
+            y: -sin(az) * cosAlt,
             z: sin(alt)
         )
     }
