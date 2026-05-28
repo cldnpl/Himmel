@@ -27,14 +27,16 @@ enum SkyNodeFactory {
     // MARK: - Stars
 
     static func makeStar(resolved: ResolvedSkyObject) -> SCNNode {
-        let mag = resolved.object.magnitude ?? 3.0
         return ProceduralStarRenderer.makeStarNode(
             for: resolved.object,
             radius: mapStarVisualRadius,
             nodeName: nodeNamePrefix + resolved.id,
             position: position(for: resolved.horizontal),
             segmentCount: 48,
-            includeHalo: mag < 2.4,
+            // No halo for ANY star → every star is the same small coloured dot
+            // (like Sheliak / Sulafat). The bright ones looked huge only because
+            // of their glow halo; the core radius is already uniform.
+            includeHalo: false,
             appliesClassificationScale: false,
             hitTargetRadius: mapStarHitTargetRadius
         )

@@ -122,7 +122,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         let sun = SCNNode()
         let sunLight = SCNLight()
         sunLight.type = .directional
-        sunLight.intensity = 1200
+        sunLight.intensity = 600          // softer key light — planets were over-lit / washed out
         sunLight.color = UIColor(red: 1.0, green: 0.97, blue: 0.9, alpha: 1.0)
         sun.light = sunLight
         scene.rootNode.addChildNode(sun)
@@ -131,7 +131,7 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         let ambient = SCNNode()
         let ambientLight = SCNLight()
         ambientLight.type = .ambient
-        ambientLight.intensity = 45
+        ambientLight.intensity = 22       // dim fill so the night side reads without flattening
         ambient.light = ambientLight
         scene.rootNode.addChildNode(ambient)
 
@@ -463,6 +463,19 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         return sprite
     }
 
+    /// Make a loaded model self-illuminated: ignore scene lights (`.constant`)
+    /// and emit its own diffuse texture, so every part — including Saturn's rings,
+    /// which a directional Sun light would leave in shadow — is fully visible.
+    private static func makeModelUnlit(_ node: SCNNode) {
+        node.enumerateHierarchy { child, _ in
+            guard let materials = child.geometry?.materials else { return }
+            for material in materials {
+                material.lightingModel = .constant
+                material.emission.contents = material.diffuse.contents
+            }
+        }
+    }
+
     /// On-sphere radius (scene units) for a textured body.
     private func sphereRadius(for object: CelestialObject) -> CGFloat {
         switch object.type {
@@ -470,8 +483,8 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         case .moon: return 2.6
         default:
             switch object.name {
-            case "Jupiter": return 2.2
-            case "Saturn":  return 2.0
+            case "Jupiter": return 2.6
+            case "Saturn":  return 3.6   // bigger so the rings read clearly on the map
             case "Venus":   return 2.0
             case "Mars":    return 1.7
             case "Mercury": return 1.3
@@ -537,6 +550,11 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                 model.renderingOrder = 50
 
                 if isSaturn {
+                    // Render Saturn UNLIT (self-illuminated by its own texture) so
+                    // the rings are always visible — a directional Sun light leaves
+                    // the rings in shadow / too dark to read on the map.
+                    Self.makeModelUnlit(model)
+
                     // ── Saturn re-alignment ─────────────────────────────────
                     // facing → tilt → model. `facing` aims the model's −Z at the
                     // camera (origin); the fixed `tilt` then opens the ring plane
@@ -618,21 +636,31 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
 
     // MARK: - Dome texture
 
-    /// Equirectangular star map for the SkyDome sphere. Loading priority:
-    ///   1. "StarsMilkyWay8K" — the Solar System Scope 8K Stars + Milky Way map.
-    ///   2. "StarrySky"       — any other bundled equirect/photo.
-    ///   3. procedural 4096×2048 starfield (so the dome is never empty).
+    /// Equirectangular star map for the SkyDome sphere.
     ///
-    /// The image is returned UNROTATED: rotation is applied to the dome node in
-    /// `SkyDome.make`, which is free for an 8K texture (re-rasterising 130+ MB
-    /// here would spike memory and stutter the first frame).
+    /// CRITICAL: the 8K map is loaded as a RAW resource file from the bundle, NOT
+    /// from `Assets.xcassets`. Xcode's asset catalog recompresses / converts large
+    /// images (lossy GPU formats + downsampling), which shredded the Milky Way's
+    /// fine gradients into blocky purple/cyan artifacts. `UIImage(contentsOfFile:)`
+    /// on the standalone file preserves the original JPEG fidelity 1:1.
+    ///
+    /// Returned UNROTATED: orientation is applied to the dome node in
+    /// `SkyDome.make` (free for an 8K texture — re-rasterising here would spike
+    /// memory and stutter the first frame).
     private func domeTexture() -> UIImage {
-        UIImage(named: "StarsMilkyWay8K")
-            ?? UIImage(named: "StarrySky")
-            ?? backgroundGradientImage()
+        // Use the StarsMilkyWay8K photo as the immersive background. Loaded RAW
+        // from the bundle resource (Resources/StarsMilkyWay8K.jpg) rather than via
+        // UIImage(named:) so the Asset Catalog's lossy recompression is bypassed
+        // and the original fidelity is preserved. Falls back to a procedural
+        // backdrop only if the file is missing.
+        if let path = Bundle.main.path(forResource: "StarsMilkyWay8K", ofType: "jpg"),
+           let image = UIImage(contentsOfFile: path) {
+            return image
+        }
+        return backgroundGradientImage(includeStars: false)
     }
 
-    private func backgroundGradientImage() -> UIImage {
+    private func backgroundGradientImage(includeStars: Bool = true) -> UIImage {
         // A baked equirectangular (2:1) starfield: deep-space gradient + a faint
         // diagonal Milky Way band + thousands of stars of varying brightness.
         // 4096×2048 gives ~11 texel/° — enough that, with a ~75° FoV, texels are
@@ -681,7 +709,10 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
             }
             cg.restoreGState()
 
-            // Stars
+            // Background point-stars — drawn only when requested. For the sky dome
+            // we pass `includeStars: false` so the ONLY stars on screen are the
+            // named catalog stars.
+            guard includeStars else { return }
             var seed: UInt64 = 0x5EED_1234_ABCD
             func rnd() -> CGFloat {
                 seed ^= seed >> 12; seed ^= seed << 25; seed ^= seed >> 27

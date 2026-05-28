@@ -285,6 +285,24 @@ final class SkyLabelOverlayView: UIView {
             guard let view = pool[entry.item.id],
                   let size = sizeCache[entry.item.id] else { continue }
 
+            // Constellation names are ALWAYS shown at their centroid when on
+            // screen — they are exempt from collision culling so they never
+            // vanish just because a star label sits nearby (previously the lowest
+            // priority meant they got dropped whenever centred). They are NOT
+            // added to `placed`, so they don't block other labels.
+            if entry.item.kind == .constellation {
+                var center = entry.anchor
+                // Keep the name fully on screen even if the centroid is near an edge.
+                center.x = min(max(center.x, size.width / 2 + 4), viewBounds.width - size.width / 2 - 4)
+                center.y = min(max(center.y, size.height / 2 + 4), viewBounds.height - size.height / 2 - 4)
+                view.frame = CGRect(x: center.x - size.width / 2,
+                                    y: center.y - size.height / 2,
+                                    width: size.width, height: size.height)
+                view.isHidden = false
+                shownIDs.insert(entry.item.id)
+                continue
+            }
+
             let rect = placement(for: entry.item, anchor: entry.anchor, size: size,
                                  bounds: viewBounds, placed: placed, anchors: anchors)
             if let rect {

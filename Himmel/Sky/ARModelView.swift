@@ -489,7 +489,7 @@ final class ARModelViewController: UIViewController, ARSessionDelegate, ARCoachi
         guard presentedViewController == nil else { return }
         captureService.capture(from: arView) { [weak self] image in
             guard let self else { return }
-            let preview = SnapshotPreviewViewController(image: image)
+            let preview = SnapshotPreviewViewController(image: image, object: self.object)
             self.present(preview, animated: true)
         }
     }
@@ -622,18 +622,17 @@ private final class PhotoLibrarySaver {
 
 private final class SnapshotPreviewViewController: UIViewController {
     private let image: UIImage
+    private let object: CelestialObject?
     private let photoSaver = PhotoLibrarySaver()
 
     private let imageView = UIImageView()
     private let imageContainer = UIView()
-    private let statusLabel = UILabel()
     private let saveButton = UIButton(type: .system)
     private let shareButton = UIButton(type: .system)
-    private let discardButton = UIButton(type: .system)
-    private let closeButton = UIButton(type: .system)
 
-    init(image: UIImage) {
+    init(image: UIImage, object: CelestialObject?) {
         self.image = image
+        self.object = object
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .pageSheet
     }
@@ -643,177 +642,152 @@ private final class SnapshotPreviewViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
-        configureSheetPresentation()
-        configureImageView()
-        configureStatusLabel()
-        configureButtons()
-        layoutPreview()
+        if let sheet = sheetPresentationController {
+            sheet.detents = [.large()]
+            sheet.prefersGrabberVisible = true
+            sheet.preferredCornerRadius = 28
+        }
+        buildLayout()
     }
 
-    private func configureSheetPresentation() {
-        guard let sheet = sheetPresentationController else { return }
-        sheet.detents = [.medium(), .large()]
-        sheet.selectedDetentIdentifier = .large
-        sheet.prefersGrabberVisible = true
-        sheet.prefersScrollingExpandsWhenScrolledToEdge = true
-        sheet.preferredCornerRadius = 28
-    }
+    // MARK: Layout (HIG-compliant)
 
-    private func configureImageView() {
+    private func buildLayout() {
+        // ── Native-style top bar: Cancel (X) · title · Save (checkmark) ──────
+        let cancel = UIButton(type: .system)
+        cancel.setImage(UIImage(systemName: "xmark"), for: .normal)
+        cancel.tintColor = .systemBlue
+        cancel.accessibilityLabel = "Cancel"
+        cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+        cancel.translatesAutoresizingMaskIntoConstraints = false
+
+        saveButton.setImage(UIImage(systemName: "checkmark"), for: .normal)
+        saveButton.tintColor = .systemBlue
+        saveButton.accessibilityLabel = "Save to Photos"
+        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = UILabel()
+        title.text = "Snapshot"
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.textColor = .label
+        title.textAlignment = .center
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        // ── Clean floating preview (rounded, subtle shadow, no border) ──────
         imageView.image = image
-        imageView.contentMode = .scaleAspectFit
-        imageView.backgroundColor = .black
-        imageView.layer.cornerRadius = 18
+        imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
+        imageView.layer.cornerRadius = 18
+        imageView.layer.cornerCurve = .continuous
         imageView.translatesAutoresizingMaskIntoConstraints = false
 
-        imageContainer.backgroundColor = .black
-        imageContainer.layer.cornerRadius = 20
+        imageContainer.layer.cornerRadius = 18
+        imageContainer.layer.cornerCurve = .continuous
         imageContainer.layer.shadowColor = UIColor.black.cgColor
-        imageContainer.layer.shadowOpacity = 0.20
-        imageContainer.layer.shadowRadius = 18
-        imageContainer.layer.shadowOffset = CGSize(width: 0, height: 10)
+        imageContainer.layer.shadowOpacity = 0.18
+        imageContainer.layer.shadowRadius = 16
+        imageContainer.layer.shadowOffset = CGSize(width: 0, height: 8)
         imageContainer.translatesAutoresizingMaskIntoConstraints = false
-    }
-
-    private func configureStatusLabel() {
-        statusLabel.text = ""
-        statusLabel.textAlignment = .center
-        statusLabel.textColor = .secondaryLabel
-        statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
-        statusLabel.numberOfLines = 2
-    }
-
-    private func configureButtons() {
-        var closeConfig = UIButton.Configuration.plain()
-        closeConfig.image = UIImage(systemName: "multiply.circle.fill")
-        closeConfig.baseForegroundColor = .tertiaryLabel
-        closeButton.configuration = closeConfig
-        closeButton.accessibilityLabel = "Discard"
-
-        configurePrimaryButton(saveButton, title: "Save to Photos", imageName: "square.and.arrow.down")
-        configureShareButton(shareButton)
-        configureSecondaryButton(discardButton, title: "Discard")
-
-        closeButton.addTarget(self, action: #selector(discardTapped), for: .touchUpInside)
-        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
-        shareButton.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
-        discardButton.addTarget(self, action: #selector(discardTapped), for: .touchUpInside)
-
-        saveButton.accessibilityLabel = "Save to Photos"
-        shareButton.accessibilityLabel = "Share"
-        discardButton.accessibilityLabel = "Discard"
-    }
-
-    private func configurePrimaryButton(_ button: UIButton, title: String, imageName: String) {
-        var config = UIButton.Configuration.borderedProminent()
-        config.title = title
-        config.image = UIImage(systemName: imageName)
-        config.imagePadding = 8
-        config.baseBackgroundColor = .systemBlue
-        config.baseForegroundColor = .white
-        config.cornerStyle = .large
-        config.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16)
-        button.configuration = config
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-    }
-
-    private func configureShareButton(_ button: UIButton) {
-        var config = UIButton.Configuration.bordered()
-        config.title = "Share"
-        config.image = UIImage(systemName: "square.and.arrow.up")
-        config.imagePadding = 8
-        config.baseForegroundColor = .systemBlue
-        config.cornerStyle = .large
-        config.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16)
-        button.configuration = config
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-    }
-
-    private func configureSecondaryButton(_ button: UIButton, title: String) {
-        var config = UIButton.Configuration.plain()
-        config.title = title
-        config.baseForegroundColor = .systemRed
-        config.cornerStyle = .large
-        button.configuration = config
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-    }
-
-    private func layoutPreview() {
-        let titleLabel = UILabel()
-        titleLabel.text = "Snapshot"
-        titleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
-        titleLabel.textColor = .label
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
         imageContainer.addSubview(imageView)
 
-        let controls = UIStackView(arrangedSubviews: [saveButton, shareButton, discardButton])
-        controls.axis = .vertical
-        controls.spacing = 12
-        controls.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        // ── Parameter grid + prominent Share button ─────────────────────────
+        let grid = makeParameterGrid()
+        grid.translatesAutoresizingMaskIntoConstraints = false
 
-        view.addSubview(titleLabel)
-        view.addSubview(closeButton)
-        view.addSubview(imageContainer)
-        view.addSubview(statusLabel)
-        view.addSubview(controls)
+        var shareConfig = UIButton.Configuration.filled()
+        shareConfig.title = "Share"
+        shareConfig.image = UIImage(systemName: "square.and.arrow.up")
+        shareConfig.imagePadding = 8
+        shareConfig.baseBackgroundColor = .systemBlue
+        shareConfig.cornerStyle = .capsule
+        shareButton.configuration = shareConfig
+        shareButton.accessibilityLabel = "Share"
+        shareButton.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
+        shareButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let aspectRatio = image.size.width > 0 ? image.size.height / image.size.width : 1
-        let imageAspectConstraint = imageContainer.heightAnchor.constraint(
-            equalTo: imageContainer.widthAnchor,
-            multiplier: aspectRatio
-        )
-        imageAspectConstraint.priority = .defaultHigh
+        [cancel, title, saveButton, imageContainer, grid, shareButton].forEach(view.addSubview)
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
-            titleLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            title.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
+            title.centerXAnchor.constraint(equalTo: view.centerXAnchor),
 
-            closeButton.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            closeButton.widthAnchor.constraint(equalToConstant: 36),
-            closeButton.heightAnchor.constraint(equalToConstant: 36),
+            cancel.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            cancel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
 
-            imageContainer.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 20),
-            imageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            imageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            imageContainer.heightAnchor.constraint(lessThanOrEqualTo: view.heightAnchor, multiplier: 0.52),
-            imageAspectConstraint,
+            saveButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            saveButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            imageContainer.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 18),
+            imageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
+            imageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            imageContainer.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.42),
 
             imageView.topAnchor.constraint(equalTo: imageContainer.topAnchor),
             imageView.leadingAnchor.constraint(equalTo: imageContainer.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: imageContainer.trailingAnchor),
             imageView.bottomAnchor.constraint(equalTo: imageContainer.bottomAnchor),
 
-            statusLabel.topAnchor.constraint(equalTo: imageContainer.bottomAnchor, constant: 18),
-            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            grid.topAnchor.constraint(equalTo: imageContainer.bottomAnchor, constant: 22),
+            grid.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 26),
+            grid.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -26),
 
-            controls.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 14),
-            controls.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            controls.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            controls.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18),
-
-            saveButton.heightAnchor.constraint(equalToConstant: 52),
-            shareButton.heightAnchor.constraint(equalToConstant: 52),
-            discardButton.heightAnchor.constraint(equalToConstant: 44)
+            shareButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            shareButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            shareButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            shareButton.heightAnchor.constraint(equalToConstant: 52)
         ])
     }
 
+    /// Clean parameter grid: a grey header + label/value rows, native system fonts.
+    private func makeParameterGrid() -> UIView {
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 12
+        guard let object else { return stack }
+
+        let header = UILabel()
+        header.text = object.name.uppercased()
+        header.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.textColor = .secondaryLabel
+        stack.addArrangedSubview(header)
+
+        for item in DetailParameters.make(for: object).prefix(6) where !item.label.isEmpty {
+            let label = UILabel()
+            label.text = item.label
+            label.font = .systemFont(ofSize: 15, weight: .regular)
+            label.textColor = .secondaryLabel
+
+            let value = UILabel()
+            value.text = item.value
+            value.font = .systemFont(ofSize: 15, weight: .medium)
+            value.textColor = .label
+            value.textAlignment = .right
+            value.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+            let row = UIStackView(arrangedSubviews: [label, value])
+            row.axis = .horizontal
+            row.spacing = 12
+            stack.addArrangedSubview(row)
+        }
+        return stack
+    }
+
+    // MARK: Actions
+
+    @objc private func cancelTapped() { dismiss(animated: true) }
+
     @objc private func saveTapped() {
-        statusLabel.text = "Saving..."
         saveButton.isEnabled = false
         photoSaver.save(image) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.saveButton.isEnabled = true
-                self.statusLabel.text = ""
                 switch result {
                 case .success:
-                    self.showAlert(title: "Saved to Photos", message: "Your AR snapshot has been saved.")
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    self.saveButton.setImage(UIImage(systemName: "checkmark.circle.fill"), for: .normal)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.dismiss(animated: true) }
                 case .denied:
                     self.showAlert(title: "Photos Access Needed", message: "Allow photo access in Settings to save this snapshot.")
                 case .failure:
@@ -824,14 +798,24 @@ private final class SnapshotPreviewViewController: UIViewController {
     }
 
     @objc private func shareTapped() {
-        let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
-        activity.popoverPresentationController?.sourceView = shareButton
-        activity.popoverPresentationController?.sourceRect = shareButton.bounds
-        present(activity, animated: true)
-    }
+        // Immediate tactile/visual feedback so the tap never feels "dead".
+        UIView.animate(withDuration: 0.08, animations: {
+            self.shareButton.transform = CGAffineTransform(scaleX: 0.96, y: 0.96)
+        }, completion: { _ in
+            UIView.animate(withDuration: 0.12) { self.shareButton.transform = .identity }
+        })
 
-    @objc private func discardTapped() {
-        dismiss(animated: true)
+        // Present on the NEXT main-runloop tick and feed the image through a
+        // lazy UIActivityItemProvider (its `item` is fetched off the main thread
+        // by the system), so building the share sheet never blocks the UI.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let provider = SnapshotItemProvider(image: self.image)
+            let activity = UIActivityViewController(activityItems: [provider], applicationActivities: nil)
+            activity.popoverPresentationController?.sourceView = self.shareButton
+            activity.popoverPresentationController?.sourceRect = self.shareButton.bounds
+            self.present(activity, animated: true)
+        }
     }
 
     private func showAlert(title: String, message: String) {
@@ -839,6 +823,19 @@ private final class SnapshotPreviewViewController: UIViewController {
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
+}
+
+// MARK: - Lazy share item (keeps the share sheet off the main thread)
+
+/// Supplies the snapshot image to `UIActivityViewController`. The system reads
+/// `item` on a background queue, so large-image handoff never blocks the UI.
+private final class SnapshotItemProvider: UIActivityItemProvider {
+    private let image: UIImage
+    init(image: UIImage) {
+        self.image = image
+        super.init(placeholderItem: image)
+    }
+    override var item: Any { image }
 }
 
 // MARK: - Hint label (rounded translucent pill)

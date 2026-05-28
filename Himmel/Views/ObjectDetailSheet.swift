@@ -170,6 +170,7 @@ enum DetailParameters {
                 Item(label: "Age", value: metadata.age),
                 Item(label: "Color", value: metadata.color),
                 Item(label: "Temperature", value: metadata.temperature),
+                Item(label: "Diameter", value: metadata.diameter),
                 Item(label: "Distance from Earth", value: metadata.distanceFromEarth)
             ]
         case .constellation:
