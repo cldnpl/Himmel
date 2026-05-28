@@ -135,11 +135,14 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     /// add a frame of latency and cause the visible stutter. A light
     /// quaternion slerp smooths sensor jitter without adding lag.
     nonisolated func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        let target = simd_quatf(motion.currentTransform)
+        // 1. Raw device attitude (body→world) as a quaternion.
+        let attitude = simd_quatf(motion.currentTransform)
+        // 2. Apply the camera-mapping policy: invert (q⁻¹) so pitch/yaw track the
+        //    phone naturally instead of mirrored. See SkyCameraMotion for the math.
+        let target = SkyCameraMotion.cameraOrientation(for: attitude)
+        // 3. Slerp from the current orientation → anti-jitter, zero added lag.
         let current = cameraNode.simdOrientation
-        // Smoothing factor: 1.0 = instant (most responsive), lower = smoother.
-        let smoothed = simd_slerp(current, target, 0.5)
-        cameraNode.simdOrientation = smoothed
+        cameraNode.simdOrientation = simd_slerp(current, target, 0.5)
     }
 
     // MARK: - Tap
