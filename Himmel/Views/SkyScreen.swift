@@ -80,7 +80,7 @@ struct SkyScreen: View {
             }
             // Live AR onboarding hint — shown until the phone is aimed at the sky.
             .overlay {
-                if viewModel.isLiveARMode && !viewModel.arShowVirtualSky && !viewModel.liveARPointingAtSky {
+                if viewModel.isLiveARMode && !viewModel.liveARPointingAtSky {
                     liveAROnboarding
                 }
             }
@@ -149,40 +149,63 @@ struct SkyScreen: View {
     }
 
     private var bottomControls: some View {
-        HStack(spacing: 14) {
-            controlButton(
-                systemImage: viewModel.showConstellations
-                    ? "point.3.connected.trianglepath.dotted"
-                    : "point.3.filled.connected.trianglepath.dotted",
-                isActive: viewModel.showConstellations,
-                action: viewModel.toggleConstellations
-            )
-            controlButton(
-                systemImage: "sparkles",
-                label: "Today",
-                isActive: false,
-                action: viewModel.presentFeatured
-            )
-            // Live AR Mode toggle — camera passthrough of the real sky.
-            controlButton(
-                systemImage: viewModel.isLiveARMode ? "camera.viewfinder" : "arkit",
-                label: "Live AR",
-                isActive: viewModel.isLiveARMode,
-                action: viewModel.toggleLiveARMode
-            )
-            // Within Live AR: switch the backdrop between the real sky and the
-            // app's spherical sky (blended over the real one).
-            if viewModel.isLiveARMode {
-                controlButton(
-                    systemImage: viewModel.arShowVirtualSky ? "globe" : "moon.stars",
-                    label: viewModel.arShowVirtualSky ? "App Sky" : "Real Sky",
-                    isActive: viewModel.arShowVirtualSky,
-                    action: viewModel.toggleARSky
-                )
+        // Horizontally scrollable so the pills never wrap or clip, even on narrow
+        // devices.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                if viewModel.isLiveARMode {
+                    liveARControls
+                } else {
+                    starMapControls
+                }
             }
-            Spacer()
+            .padding(.vertical, 2)
         }
-        .padding(.bottom, 30)
+        .scrollBounceBehavior(.basedOnSize)
+        .padding(.bottom, 12)
+    }
+
+    /// Star-map (non-AR) controls.
+    @ViewBuilder
+    private var starMapControls: some View {
+        controlButton(
+            systemImage: viewModel.showConstellations
+                ? "point.3.connected.trianglepath.dotted"
+                : "point.3.filled.connected.trianglepath.dotted",
+            isActive: viewModel.showConstellations,
+            action: viewModel.toggleConstellations
+        )
+        controlButton(
+            systemImage: "sparkles",
+            label: "Today",
+            isActive: false,
+            action: viewModel.presentFeatured
+        )
+        // Enter Live AR Mode — camera passthrough of the real sky.
+        controlButton(
+            systemImage: "arkit",
+            label: "Live AR",
+            isActive: false,
+            action: viewModel.toggleLiveARMode
+        )
+    }
+
+    /// Live AR controls: just BACK (to the star map) and the Real Sky / AR Sky
+    /// backdrop toggle — nothing else.
+    @ViewBuilder
+    private var liveARControls: some View {
+        controlButton(
+            systemImage: "chevron.left",
+            label: "Back",
+            isActive: false,
+            action: viewModel.toggleLiveARMode
+        )
+        controlButton(
+            systemImage: viewModel.arShowVirtualSky ? "globe" : "moon.stars",
+            label: viewModel.arShowVirtualSky ? "AR Sky" : "Real Sky",
+            isActive: viewModel.arShowVirtualSky,
+            action: viewModel.toggleARSky
+        )
     }
 
     @ViewBuilder
@@ -197,7 +220,10 @@ struct SkyScreen: View {
                 Image(systemName: systemImage)
                     .font(.system(size: 16, weight: .medium))
                 if let label {
-                    Text(label).font(.subheadline.weight(.medium))
+                    Text(label)
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)   // never wrap ("Liv e AR")
                 }
             }
             .foregroundStyle(isActive ? Color.white : Color.white.opacity(0.85))

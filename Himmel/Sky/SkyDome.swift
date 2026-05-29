@@ -27,6 +27,31 @@ enum SkyDome {
     /// sits behind every other object, and smaller than the camera's `zFar`.
     static let radius: CGFloat = 140
 
+    /// KVC key for the shader uniform that toggles below-horizon clipping.
+    /// 0 → full sphere (virtual / non-AR mode); 1 → only the sky hemisphere is
+    /// drawn, the lower half fades out so the live camera (ground/buildings)
+    /// shows through in AR Sky mode.
+    static let horizonFadeKey = "horizonFade"
+
+    /// Surface shader modifier that fades the dome out below the horizon.
+    /// World +Z is up, so a fragment's world-space direction `.z` is sin(altitude):
+    /// ≥0 above the horizon, <0 below. When `horizonFade` is 1 we smoothstep the
+    /// alpha to zero just under the horizon line, confining the 360° backdrop to
+    /// the sky exactly like the real celestial bodies. Runs in the SURFACE stage,
+    /// where `u_inverseViewTransform` and `_surface.position` are both available
+    /// (the transform uniforms are exposed via the `scn_frame` struct in modern
+    /// SceneKit Metal; the legacy `u_inverseViewTransform` alias is undeclared and
+    /// makes the shader fail to compile → magenta dome).
+    private static let horizonClipModifier = """
+    #pragma arguments
+    float horizonFade;
+    #pragma body
+    float3 worldDir = normalize((scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz);
+    float clipped = smoothstep(-0.04, 0.06, worldDir.z);
+    float fade = mix(1.0, clipped, horizonFade);
+    _surface.diffuse.a *= half(fade);
+    """
+
     /// Build the sky-dome node.
     ///
     /// - Parameters:
@@ -98,6 +123,13 @@ enum SkyDome {
         if brightness < 0.999 {
             material.multiply.contents = UIColor(white: brightness, alpha: 1.0)
         }
+
+        // Below-horizon clipping (disabled by default; enabled in AR Sky mode).
+        // Needs alpha blending so the faded lower half lets the camera through.
+        material.blendMode = .alpha
+        material.transparencyMode = .default
+        material.shaderModifiers = [.surface: horizonClipModifier]
+        material.setValue(NSNumber(value: 0.0), forKey: horizonFadeKey)
 
         sphere.firstMaterial = material
 

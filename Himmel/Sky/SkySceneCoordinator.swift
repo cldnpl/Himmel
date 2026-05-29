@@ -185,6 +185,7 @@ final class SkySceneCoordinator: NSObject {
             cameraPassthrough.stop()
             skyDomeNode?.isHidden = false
             skyDomeNode?.opacity = 1.0
+            setDomeHorizonClip(false)
             let night = UIColor(red: 0.0, green: 0.005, blue: 0.02, alpha: 1.0)
             scene.background.contents = night
             scnView.backgroundColor = night
@@ -203,14 +204,19 @@ final class SkySceneCoordinator: NSObject {
             cameraPassthrough.start { _ in }
 
             if virtualSky {
-                // App's spherical sky blended over the real one → full sky always.
+                // App's spherical sky blended over the real one, but CLIPPED to the
+                // sky hemisphere — the dome fades out below the horizon so the live
+                // camera (ground/buildings) shows through there, just like the real
+                // celestial bodies.
                 skyDomeNode?.isHidden = false
                 skyDomeNode?.opacity = 0.6
-                labelOverlay.cullBelowHorizon = false
+                setDomeHorizonClip(true)
+                labelOverlay.cullBelowHorizon = true
             } else {
                 // Pure real sky → bodies only above the horizon.
                 skyDomeNode?.isHidden = true
                 skyDomeNode?.opacity = 1.0
+                setDomeHorizonClip(false)
                 labelOverlay.cullBelowHorizon = true
             }
         }
@@ -218,12 +224,19 @@ final class SkySceneCoordinator: NSObject {
         refreshAROverlayGating()
     }
 
-    /// Hide stars/planets whose real altitude is below the horizon — only in the
-    /// pure REAL-sky AR state (the app-sky dome already provides a full backdrop).
+    /// Hide stars/planets whose real altitude is below the horizon in ANY Live AR
+    /// state. The dome is now horizon-clipped even in AR Sky mode, so below-horizon
+    /// bodies would otherwise float over the live camera's ground/buildings.
     private func applyHorizonCulling() {
-        let cull = isLiveARMode && !arShowVirtualSky
+        let cull = isLiveARMode
         for (_, node) in starNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
         for (_, node) in bodyNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
+    }
+
+    /// Toggle the dome's below-horizon fade (see `SkyDome.horizonClipModifier`).
+    private func setDomeHorizonClip(_ enabled: Bool) {
+        skyDomeNode?.geometry?.firstMaterial?
+            .setValue(NSNumber(value: enabled ? 1.0 : 0.0), forKey: SkyDome.horizonFadeKey)
     }
 
     /// In the pure REAL-sky AR state, the overlay must appear ONLY when the phone
@@ -231,10 +244,21 @@ final class SkySceneCoordinator: NSObject {
     /// buildings/ground as the user pans around. The app-sky and virtual states
     /// always show the overlay (they provide their own sky backdrop).
     private func refreshAROverlayGating() {
-        let realSkyAR = isLiveARMode && !arShowVirtualSky
-        let visible = !realSkyAR || liveARPointingAtSky
-        skyRoot.isHidden = !visible
-        labelOverlay.alpha = visible ? 1 : 0
+        // In ANY Live AR sub-mode, the celestial layer AND the app-sky dome appear
+        // ONLY while the phone is aimed at the open sky. The instant the user looks
+        // toward the horizon / buildings (pitched down), everything is hidden so it
+        // never covers the surrounding environment.
+        let gated = isLiveARMode && !liveARPointingAtSky
+        skyRoot.isHidden = gated
+        labelOverlay.alpha = gated ? 0 : 1
+
+        if !isLiveARMode {
+            skyDomeNode?.isHidden = false            // virtual mode: always visible
+        } else if arShowVirtualSky {
+            skyDomeNode?.isHidden = gated             // app sky: only when pointing up
+        } else {
+            skyDomeNode?.isHidden = true              // real sky: no dome at all
+        }
     }
 
     func start() {
@@ -685,36 +709,27 @@ final class SkySceneCoordinator: NSObject {
                 model.name = "visual"
                 model.renderingOrder = 50
 
-                if isSaturn {
-                    // Render Saturn UNLIT (self-illuminated by its own texture) so
-                    // the rings are always visible — a directional Sun light leaves
-                    // the rings in shadow / too dark to read on the map.
-                    Self.makeModelUnlit(model)
+                // Keep every body UPRIGHT and FRONTAL: a billboard makes it always
+                // face the camera with screen-up as up, so models never look tilted
+                // or turned away. Their fitted size is unchanged.
+                let billboard = SCNNode()
+                let bb = SCNBillboardConstraint()
+                bb.freeAxes = .all
+                billboard.constraints = [bb]
 
-                    // ── Saturn re-alignment ─────────────────────────────────
-                    // facing → tilt → model. `facing` aims the model's −Z at the
-                    // camera (origin); the fixed `tilt` then opens the ring plane
-                    // into the iconic oblique pose; the model spins about its pole
-                    // INSIDE the tilt, so the rings stay put while the globe turns.
-                    let facing = SCNNode()
-                    let tilt = SCNNode()
-                    tilt.eulerAngles = SCNVector3(-Float.pi * 0.16, 0, 0) // ≈ −29° about local X
-                    model.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 140)))
-                    tilt.addChildNode(model)
-                    facing.addChildNode(tilt)
-                    container.addChildNode(facing)
-                    self.bodiesContainer.addChildNode(container)
-                    facing.look(at: SCNVector3Zero)   // −Z → camera at (0,0,0)
+                if isSaturn {
+                    // Unlit so the rings always read; a fixed tilt opens the ring
+                    // plane obliquely toward the user (no tumbling).
+                    Self.makeModelUnlit(model)
+                    model.eulerAngles = SCNVector3(-Float.pi * 0.13, 0, 0)
                 } else {
-                    // Other planets/Moon: keep PBR lighting but strip any baked
-                    // emissive so the Sun light shapes craters/bands with contrast
-                    // instead of blowing the surface out to flat white.
+                    // Strip baked emissive so the Sun light shapes the surface.
                     Self.calibrateLitModel(model)
-                    // A gentle spin about the polar (Y) axis.
-                    model.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 120)))
-                    container.addChildNode(model)
-                    self.bodiesContainer.addChildNode(container)
                 }
+
+                billboard.addChildNode(model)
+                container.addChildNode(billboard)
+                self.bodiesContainer.addChildNode(container)
 
                 // Name label handled by SkyLabelOverlayView (screen-space).
                 placeholder.removeFromParentNode()
