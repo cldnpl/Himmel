@@ -29,6 +29,13 @@ final class SkyViewModel {
 
     var showConstellations: Bool = true
     var showLabels: Bool = false
+    /// Live AR Mode: real camera passthrough behind the celestial overlay.
+    var isLiveARMode: Bool = false
+    /// Within Live AR: overlay the app's spherical sky (dome) blended over the
+    /// real sky, instead of projecting bodies only onto the real sky.
+    var arShowVirtualSky: Bool = false
+    /// Set by the renderer once the phone is aimed clearly above the horizon.
+    var liveARPointingAtSky: Bool = false
     var selectedObject: CelestialObject?
     var isFeaturedSheetPresented: Bool = false
     var navigationSearchText: String = ""
@@ -175,6 +182,10 @@ final class SkyViewModel {
     func dismissSelection() { selectedObject = nil }
 
     func toggleConstellations() { showConstellations.toggle() }
+
+    func toggleLiveARMode() { isLiveARMode.toggle() }
+
+    func toggleARSky() { arShowVirtualSky.toggle() }
 
     func presentFeatured() { isFeaturedSheetPresented = true }
     func dismissFeatured() { isFeaturedSheetPresented = false }

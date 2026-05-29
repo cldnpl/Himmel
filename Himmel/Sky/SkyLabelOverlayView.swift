@@ -81,6 +81,10 @@ final class SkyLabelOverlayView: UIView {
         }
     }
 
+    /// Live AR Mode: hide labels of objects below the horizon so names never sit
+    /// on the surrounding buildings/ground — only the real sky is annotated.
+    var cullBelowHorizon = false
+
     private var pool: [String: PaddedLabel] = [:]
     private var sizeCache: [String: CGSize] = [:]
 
@@ -129,14 +133,16 @@ final class SkyLabelOverlayView: UIView {
     /// bodies) a translucent rounded pill so names lift off the dense Milky Way.
     private func style(_ label: PaddedLabel, for item: SkyLabel) {
         let shadow = NSShadow()
-        shadow.shadowColor = UIColor.black.withAlphaComponent(0.9)
-        shadow.shadowBlurRadius = 3
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.95)
+        shadow.shadowBlurRadius = 4
         shadow.shadowOffset = .zero
 
         var font: UIFont
         var color: UIColor
         var kern: CGFloat = 0.2
-        var pill = false
+        // EVERY label gets a translucent pill so names stay readable over a bright
+        // daytime sky as well as the night background.
+        var pill = true
         var text = item.text
 
         switch item.kind {
@@ -180,8 +186,8 @@ final class SkyLabelOverlayView: UIView {
         label.numberOfLines = 1
         if pill {
             label.backgroundColor = isHighlighted
-                ? UIColor(red: 0.20, green: 0.48, blue: 1.0, alpha: 0.42)
-                : UIColor(white: 0, alpha: 0.32)
+                ? UIColor(red: 0.20, green: 0.48, blue: 1.0, alpha: 0.55)
+                : UIColor(white: 0, alpha: 0.5)   // stronger so text reads on bright sky
             label.layer.cornerRadius = 9
             label.clipsToBounds = true
         } else {
@@ -245,6 +251,10 @@ final class SkyLabelOverlayView: UIView {
         var anchors: [CGPoint] = []   // all visible dot positions, to avoid covering them
 
         for item in labels {
+            // Live AR Mode: skip anything below the horizon (world +Z is up) so
+            // labels appear only over the real sky, never on nearby buildings.
+            if cullBelowHorizon, item.world.z < 0 { continue }
+
             let clip = viewProjection * SIMD4<Float>(item.world.x, item.world.y, item.world.z, 1)
             // clip.w > 0 ⇒ in front of the camera. Behind ⇒ skip (never drag a
             // mirror-projected ghost across the screen).

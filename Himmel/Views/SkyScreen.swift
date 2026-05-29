@@ -78,6 +78,12 @@ struct SkyScreen: View {
             .overlay {
                 SkyGuidanceArrowOverlay(guidance: viewModel.navigationGuidance)
             }
+            // Live AR onboarding hint — shown until the phone is aimed at the sky.
+            .overlay {
+                if viewModel.isLiveARMode && !viewModel.arShowVirtualSky && !viewModel.liveARPointingAtSky {
+                    liveAROnboarding
+                }
+            }
             // Search bar docked in the TOP safe area.
             .safeAreaInset(edge: .top) {
                 SkyNavigationSearchBar(
@@ -113,6 +119,35 @@ struct SkyScreen: View {
             )
     }
 
+    /// Full-screen onboarding shown when Live AR Mode is active but the phone is
+    /// not yet aimed at the open sky. English copy only.
+    private var liveAROnboarding: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "moon.stars")
+                .font(.system(size: 52, weight: .light))
+                .foregroundStyle(.white)
+            Text("Point at the Sky")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("Step outside and raise your phone toward the open sky. The stars, planets and constellations above you will appear in their real positions.")
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(28)
+        .frame(maxWidth: 360)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 0.5)
+        )
+        .padding(32)
+        .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
+        .transition(.opacity)
+        .allowsHitTesting(false)
+    }
+
     private var bottomControls: some View {
         HStack(spacing: 14) {
             controlButton(
@@ -128,8 +163,26 @@ struct SkyScreen: View {
                 isActive: false,
                 action: viewModel.presentFeatured
             )
+            // Live AR Mode toggle — camera passthrough of the real sky.
+            controlButton(
+                systemImage: viewModel.isLiveARMode ? "camera.viewfinder" : "arkit",
+                label: "Live AR",
+                isActive: viewModel.isLiveARMode,
+                action: viewModel.toggleLiveARMode
+            )
+            // Within Live AR: switch the backdrop between the real sky and the
+            // app's spherical sky (blended over the real one).
+            if viewModel.isLiveARMode {
+                controlButton(
+                    systemImage: viewModel.arShowVirtualSky ? "globe" : "moon.stars",
+                    label: viewModel.arShowVirtualSky ? "App Sky" : "Real Sky",
+                    isActive: viewModel.arShowVirtualSky,
+                    action: viewModel.toggleARSky
+                )
+            }
             Spacer()
         }
+        .padding(.bottom, 30)
     }
 
     @ViewBuilder

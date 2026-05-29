@@ -26,7 +26,15 @@ struct SkySceneView: UIViewRepresentable {
 
         let container = UIView()
 
-        // 3D scene fills the container.
+        // Live-AR camera passthrough — the BOTTOM layer, behind everything. Hidden
+        // until Live AR Mode is toggled on; shows the real sky through the (then
+        // transparent) SCNView.
+        let cameraPreview = coordinator.cameraPreviewView
+        cameraPreview.frame = container.bounds
+        cameraPreview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(cameraPreview)
+
+        // 3D scene fills the container, above the camera feed.
         let scn = coordinator.scnView
         scn.frame = container.bounds
         scn.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -46,6 +54,8 @@ struct SkySceneView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.applyARState(live: viewModel.isLiveARMode,
+                                         virtualSky: viewModel.arShowVirtualSky)
         context.coordinator.render(state: viewModel)
     }
 

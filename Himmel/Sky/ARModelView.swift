@@ -691,10 +691,9 @@ private final class SnapshotPreviewViewController: UIViewController {
         imageContainer.translatesAutoresizingMaskIntoConstraints = false
         imageContainer.addSubview(imageView)
 
-        // ── Parameter grid + prominent Share button ─────────────────────────
-        let grid = makeParameterGrid()
-        grid.translatesAutoresizingMaskIntoConstraints = false
-
+        // ── Floating Share button (directly below the snapshot card) ────────
+        // NOTE: ALL textual metadata (Phase, Illumination, distance, etc.) is
+        // intentionally removed — the snapshot itself is the sole focus.
         var shareConfig = UIButton.Configuration.filled()
         shareConfig.title = "Share"
         shareConfig.image = UIImage(systemName: "square.and.arrow.up")
@@ -706,7 +705,7 @@ private final class SnapshotPreviewViewController: UIViewController {
         shareButton.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
         shareButton.translatesAutoresizingMaskIntoConstraints = false
 
-        [cancel, title, saveButton, imageContainer, grid, shareButton].forEach(view.addSubview)
+        [cancel, title, saveButton, imageContainer, shareButton].forEach(view.addSubview)
 
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
@@ -718,59 +717,23 @@ private final class SnapshotPreviewViewController: UIViewController {
             saveButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
             saveButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
-            imageContainer.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 18),
+            // Snapshot card — the absolute centre of attention.
+            imageContainer.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 24),
             imageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
             imageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            imageContainer.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.42),
+            imageContainer.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.58),
 
             imageView.topAnchor.constraint(equalTo: imageContainer.topAnchor),
             imageView.leadingAnchor.constraint(equalTo: imageContainer.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: imageContainer.trailingAnchor),
             imageView.bottomAnchor.constraint(equalTo: imageContainer.bottomAnchor),
 
-            grid.topAnchor.constraint(equalTo: imageContainer.bottomAnchor, constant: 22),
-            grid.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 26),
-            grid.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -26),
-
-            shareButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            shareButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            shareButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            // Share floats directly below the card.
+            shareButton.topAnchor.constraint(equalTo: imageContainer.bottomAnchor, constant: 28),
+            shareButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            shareButton.widthAnchor.constraint(equalToConstant: 200),
             shareButton.heightAnchor.constraint(equalToConstant: 52)
         ])
-    }
-
-    /// Clean parameter grid: a grey header + label/value rows, native system fonts.
-    private func makeParameterGrid() -> UIView {
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.spacing = 12
-        guard let object else { return stack }
-
-        let header = UILabel()
-        header.text = object.name.uppercased()
-        header.font = .systemFont(ofSize: 13, weight: .semibold)
-        header.textColor = .secondaryLabel
-        stack.addArrangedSubview(header)
-
-        for item in DetailParameters.make(for: object).prefix(6) where !item.label.isEmpty {
-            let label = UILabel()
-            label.text = item.label
-            label.font = .systemFont(ofSize: 15, weight: .regular)
-            label.textColor = .secondaryLabel
-
-            let value = UILabel()
-            value.text = item.value
-            value.font = .systemFont(ofSize: 15, weight: .medium)
-            value.textColor = .label
-            value.textAlignment = .right
-            value.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-            let row = UIStackView(arrangedSubviews: [label, value])
-            row.axis = .horizontal
-            row.spacing = 12
-            stack.addArrangedSubview(row)
-        }
-        return stack
     }
 
     // MARK: Actions

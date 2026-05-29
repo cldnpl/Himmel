@@ -44,7 +44,8 @@ enum SkyDome {
     ///     astronomically-correct orientation.
     static func make(
         texture: UIImage,
-        rotationCCW: Float = .pi / 2
+        rotationCCW: Float = .pi / 2,
+        brightness: CGFloat = 1.0
     ) -> SCNNode {
 
         // High segment count → the UV-sphere's poles converge over many tiny
@@ -88,6 +89,15 @@ enum SkyDome {
         material.diffuse.minificationFilter  = .linear
         material.diffuse.mipFilter           = .linear   // builds mips → no shimmer
         material.diffuse.maxAnisotropy       = 16        // crisp at grazing angles
+
+        // ── Brightness attenuation ──────────────────────────────────────────
+        // Multiply the sampled texture by a grey so the backdrop reads as a
+        // SUBTLE deep-space glow instead of overpowering the catalog stars.
+        // brightness 1.0 = untouched, 0.4 ≈ 40% as bright. Done on the GPU sampler
+        // (free), so the 8K texture is never re-rasterised.
+        if brightness < 0.999 {
+            material.multiply.contents = UIColor(white: brightness, alpha: 1.0)
+        }
 
         sphere.firstMaterial = material
 

@@ -13,7 +13,7 @@ import CoreMotion
 import simd
 
 @MainActor
-final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
+final class SkySceneCoordinator: NSObject {
 
     let scnView: SCNView
 
@@ -42,6 +42,8 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     /// Exposed so the label overlay can project through the exact same camera.
     var cameraNodeForProjection: SCNNode { cameraNode }
     private let motion = MotionService()
+    /// Single main-thread clock driving camera + label updates.
+    private var displayLink: CADisplayLink?
 
     private weak var viewModel: SkyViewModel?
     private var onSelect: ((String) -> Void)?
@@ -62,6 +64,17 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     private var sunLightNode: SCNNode?
     /// Bodies for which an async hero-model load has already been kicked off.
     private var heroModelRequested: Set<String> = []
+
+    /// The inverted 8K background sphere. Hidden in Live AR Mode.
+    private var skyDomeNode: SCNNode?
+    /// Live rear-camera passthrough used by Live AR Mode (real sky behind stars).
+    let cameraPassthrough = CameraPassthrough()
+    /// The camera preview view to insert BEHIND the SCNView in the container.
+    var cameraPreviewView: UIView { cameraPassthrough.previewView }
+    private var isLiveARMode = false
+    private var arShowVirtualSky = false
+    private var liveARPointingAtSky = false
+    private let virtualFOV: CGFloat = 75
 
     private var lastRenderSignature: Int = 0
 
@@ -85,9 +98,13 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         scnView.antialiasingMode = .none
         scnView.preferredFramesPerSecond = 60
         scnView.allowsCameraControl = false
-        scnView.rendersContinuously = true   // redraw every vsync with the latest camera
-        scnView.delegate = self
+        scnView.rendersContinuously = true   // SceneKit redraws the 3D scene every vsync
         scnView.isPlaying = true
+        // NB: we deliberately do NOT use  SCNSceneRendererDelegate.updateAtTime to
+        // drive the camera/labels — on a Metal SCNView it can fire off the main
+        // thread, and mutating UILabel frames there caused the labels to freeze /
+        // drag. A main-thread CADisplayLink (see start()) guarantees UIKit-safe,
+        // frame-synced updates.
 
         // Camera — wide field of view like Sky Guide's default.
         // zFar must exceed the SkyDome radius (140) so the dome isn't clipped.
@@ -105,7 +122,9 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         // Rotation is applied to the dome NODE inside `SkyDome.make` (cheap +
         // distortion-free), so the 8K texture is never re-rasterised. Pass 0 to
         // keep the map astronomically aligned.
-        scene.rootNode.addChildNode(SkyDome.make(texture: domeTexture(), rotationCCW: .pi / 2))
+        let dome = SkyDome.make(texture: domeTexture(), rotationCCW: .pi / 2, brightness: 0.25)
+        scene.rootNode.addChildNode(dome)
+        skyDomeNode = dome
 
         scene.rootNode.addChildNode(skyRoot)
         // Group children by kind so each layer is independently manageable.
@@ -150,20 +169,96 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         self.onSelect = onSelect
     }
 
+    /// Three viewing states:
+    ///   • live == false                  → 100% virtual opaque 8K dome.
+    ///   • live && virtualSky == false     → REAL sky: camera passthrough; bodies
+    ///                                        shown only when aimed at the open sky.
+    ///   • live && virtualSky == true      → APP sky: the spherical dome blended
+    ///                                        (semi-transparent) over the real sky,
+    ///                                        so there's always a sky everywhere.
+    func applyARState(live: Bool, virtualSky: Bool) {
+        guard live != isLiveARMode || virtualSky != arShowVirtualSky else { return }
+        isLiveARMode = live
+        arShowVirtualSky = virtualSky
+
+        if !live {
+            cameraPassthrough.stop()
+            skyDomeNode?.isHidden = false
+            skyDomeNode?.opacity = 1.0
+            let night = UIColor(red: 0.0, green: 0.005, blue: 0.02, alpha: 1.0)
+            scene.background.contents = night
+            scnView.backgroundColor = night
+            scnView.isOpaque = true
+            cameraNode.camera?.fieldOfView = virtualFOV
+            labelOverlay.cullBelowHorizon = false
+            liveARPointingAtSky = false
+            viewModel?.liveARPointingAtSky = false
+        } else {
+            // Real world visible behind a transparent SCNView; match camera FoV.
+            scene.background.contents = UIColor.clear
+            scnView.isOpaque = false
+            scnView.backgroundColor = .clear
+            cameraNode.camera?.projectionDirection = .vertical
+            cameraNode.camera?.fieldOfView = cameraPassthrough.approximateVerticalFOV
+            cameraPassthrough.start { _ in }
+
+            if virtualSky {
+                // App's spherical sky blended over the real one → full sky always.
+                skyDomeNode?.isHidden = false
+                skyDomeNode?.opacity = 0.6
+                labelOverlay.cullBelowHorizon = false
+            } else {
+                // Pure real sky → bodies only above the horizon.
+                skyDomeNode?.isHidden = true
+                skyDomeNode?.opacity = 1.0
+                labelOverlay.cullBelowHorizon = true
+            }
+        }
+        applyHorizonCulling()
+        refreshAROverlayGating()
+    }
+
+    /// Hide stars/planets whose real altitude is below the horizon — only in the
+    /// pure REAL-sky AR state (the app-sky dome already provides a full backdrop).
+    private func applyHorizonCulling() {
+        let cull = isLiveARMode && !arShowVirtualSky
+        for (_, node) in starNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
+        for (_, node) in bodyNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
+    }
+
+    /// In the pure REAL-sky AR state, the overlay must appear ONLY when the phone
+    /// is actually aimed at the sky — otherwise stars would smear over the
+    /// buildings/ground as the user pans around. The app-sky and virtual states
+    /// always show the overlay (they provide their own sky backdrop).
+    private func refreshAROverlayGating() {
+        let realSkyAR = isLiveARMode && !arShowVirtualSky
+        let visible = !realSkyAR || liveARPointingAtSky
+        skyRoot.isHidden = !visible
+        labelOverlay.alpha = visible ? 1 : 0
+    }
+
     func start() {
         motion.start()
+        // Single MAIN-THREAD clock. Camera orientation AND label projection happen
+        // here, on main, every vsync — so UILabel updates are always UIKit-safe and
+        // the 2D names stay rigidly pinned to their 3D anchors (no off-thread drift).
+        let link = CADisplayLink(target: self, selector: #selector(frameTick))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    @objc private func frameTick() {
+        updateCameraAndLabelsForCurrentFrame(time: CACurrentMediaTime())
     }
 
     func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
         scnView.isPlaying = false
         motion.stop()
     }
 
-    // MARK: - Renderer-frame update (camera + labels, locked together)
-
-    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        updateCameraAndLabelsForCurrentFrame(time: time)
-    }
+    // MARK: - Per-frame update (camera + labels, locked together, on MAIN thread)
 
     private func updateCameraAndLabelsForCurrentFrame(time: TimeInterval) {
         // 1. Exact device attitude → camera orientation. NO slerp: smoothing only
@@ -174,9 +269,33 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
 
         updateNavigationGuidanceForCurrentFrame(time: time)
 
+        // In Live AR Mode, detect whether the phone is pointed at the open sky so
+        // the onboarding hint can step aside and the live sky can be revealed.
+        if isLiveARMode { updatePointingAtSky() }
+
         // 2. Re-project every label THROUGH THE CAMERA WE JUST SET, this same
         //    instant. Labels are now rigidly bound to their 3D anchor points.
         labelOverlay.refresh()
+    }
+
+    /// True once the device is aimed clearly above the horizon. Hysteresis avoids
+    /// flicker right at the horizon line.
+    private func updatePointingAtSky() {
+        // Camera forward (its local −Z) in world space; world +Z is up, so the
+        // forward's z-component is sin(view altitude).
+        let forward = cameraNode.simdWorldFront   // already the −Z axis in world
+        let altitudeSin = forward.z
+        let pointing: Bool
+        if liveARPointingAtSky {
+            pointing = altitudeSin > -0.05          // stay revealed until aimed well down
+        } else {
+            pointing = altitudeSin > 0.20           // ~12° above horizon to reveal
+        }
+        if pointing != liveARPointingAtSky {
+            liveARPointingAtSky = pointing
+            viewModel?.liveARPointingAtSky = pointing
+            refreshAROverlayGating()   // reveal/hide the overlay as the sky comes into view
+        }
     }
 
     private func updateNavigationGuidanceForCurrentFrame(time: TimeInterval) {
@@ -313,6 +432,9 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         if state.navigationTarget == nil {
             labelOverlay.highlightedLabelID = nil
         }
+
+        // Keep below-horizon objects hidden in Live AR Mode after any rebuild.
+        applyHorizonCulling()
     }
 
     /// Collect everything that should carry a screen-space label. Star labels are
@@ -463,15 +585,29 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
         return sprite
     }
 
-    /// Make a loaded model self-illuminated: ignore scene lights (`.constant`)
-    /// and emit its own diffuse texture, so every part — including Saturn's rings,
-    /// which a directional Sun light would leave in shadow — is fully visible.
+    /// Render a loaded model UNLIT: `.constant` simply displays the diffuse
+    /// texture at its true brightness, ignoring scene lights (so e.g. Saturn's
+    /// rings are never left in shadow). We must NOT also pump `emission = diffuse`
+    /// — that ADDS the texture on top of itself and blows the body out to flat
+    /// white. Stripping emission keeps full surface contrast (rings, bands).
     private static func makeModelUnlit(_ node: SCNNode) {
         node.enumerateHierarchy { child, _ in
             guard let materials = child.geometry?.materials else { return }
             for material in materials {
                 material.lightingModel = .constant
-                material.emission.contents = material.diffuse.contents
+                material.emission.contents = nil   // ← no double-exposure
+            }
+        }
+    }
+
+    /// Tame a LIT model (Moon, planets): strip any baked-in emissive map that
+    /// would self-glow the surface to blown-out white, so the directional Sun
+    /// light alone shapes the craters/bands with proper contrast.
+    private static func calibrateLitModel(_ node: SCNNode) {
+        node.enumerateHierarchy { child, _ in
+            guard let materials = child.geometry?.materials else { return }
+            for material in materials {
+                material.emission.contents = nil
             }
         }
     }
@@ -570,7 +706,11 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
                     self.bodiesContainer.addChildNode(container)
                     facing.look(at: SCNVector3Zero)   // −Z → camera at (0,0,0)
                 } else {
-                    // Other planets/Moon: a gentle spin about the polar (Y) axis.
+                    // Other planets/Moon: keep PBR lighting but strip any baked
+                    // emissive so the Sun light shapes craters/bands with contrast
+                    // instead of blowing the surface out to flat white.
+                    Self.calibrateLitModel(model)
+                    // A gentle spin about the polar (Y) axis.
                     model.runAction(.repeatForever(.rotateBy(x: 0, y: .pi * 2, z: 0, duration: 120)))
                     container.addChildNode(model)
                     self.bodiesContainer.addChildNode(container)
@@ -648,14 +788,20 @@ final class SkySceneCoordinator: NSObject, SCNSceneRendererDelegate {
     /// `SkyDome.make` (free for an 8K texture — re-rasterising here would spike
     /// memory and stutter the first frame).
     private func domeTexture() -> UIImage {
-        // Use the StarsMilkyWay8K photo as the immersive background. Loaded RAW
-        // from the bundle resource (Resources/StarsMilkyWay8K.jpg) rather than via
-        // UIImage(named:) so the Asset Catalog's lossy recompression is bypassed
-        // and the original fidelity is preserved. Falls back to a procedural
-        // backdrop only if the file is missing.
-        if let path = Bundle.main.path(forResource: "StarsMilkyWay8K", ofType: "jpg"),
-           let image = UIImage(contentsOfFile: path) {
-            return image
+        // 360° background photo as the immersive dome. Priority:
+        //   1. a RAW standalone bundle file (best fidelity — no catalog recompression)
+        //   2. the "StarsMilkyWay8K" Asset Catalog image (what's currently bundled)
+        //   3. a starless procedural backdrop.
+        // Only the dome texture is set here — clickable catalog stars / planets /
+        // constellations are untouched.
+        for ext in ["jpg", "jpeg", "png"] {
+            if let path = Bundle.main.path(forResource: "SkyBackground360", ofType: ext),
+               let image = UIImage(contentsOfFile: path) {
+                return image
+            }
+        }
+        if let catalog = UIImage(named: "StarsMilkyWay8K") {
+            return catalog
         }
         return backgroundGradientImage(includeStars: false)
     }
