@@ -35,10 +35,14 @@ struct SkyScreen: View {
                 .presentationBackground(.ultraThinMaterial)
         }
         .sheet(isPresented: featuredSheetBinding) {
-            FeaturedAstronomyView(date: viewModel.currentDate)
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(.ultraThinMaterial)
+            FeaturedAstronomyView(
+                date: viewModel.currentDate,
+                moon: viewModel.moonSnapshot,
+                planets: viewModel.resolvedObjects.filter { $0.object.type == .planet }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(.ultraThinMaterial)
         }
     }
 
@@ -190,8 +194,8 @@ struct SkyScreen: View {
         )
     }
 
-    /// Live AR controls: just BACK (to the star map) and the Real Sky / AR Sky
-    /// backdrop toggle — nothing else.
+    /// Live AR controls: just BACK (to the star map). AR is always the real-sky
+    /// passthrough — the virtual star-map sphere is no longer offered here.
     @ViewBuilder
     private var liveARControls: some View {
         controlButton(
@@ -199,12 +203,6 @@ struct SkyScreen: View {
             label: "Back",
             isActive: false,
             action: viewModel.toggleLiveARMode
-        )
-        controlButton(
-            systemImage: viewModel.arShowVirtualSky ? "globe" : "moon.stars",
-            label: viewModel.arShowVirtualSky ? "AR Sky" : "Real Sky",
-            isActive: viewModel.arShowVirtualSky,
-            action: viewModel.toggleARSky
         )
     }
 

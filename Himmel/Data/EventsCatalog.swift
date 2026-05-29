@@ -21,6 +21,7 @@ enum AstronomicalEventCategory: String, Hashable {
     case moonPhase
     case eclipse
     case season
+    case deepSky
     case other
 
     var displayName: String {
@@ -30,6 +31,7 @@ enum AstronomicalEventCategory: String, Hashable {
         case .moonPhase:          return "Moon Phase"
         case .eclipse:            return "Eclipse"
         case .season:             return "Season Marker"
+        case .deepSky:            return "Deep Sky"
         case .other:              return "Sky Event"
         }
     }
@@ -41,6 +43,7 @@ enum AstronomicalEventCategory: String, Hashable {
         case .moonPhase:          return "moon.stars.fill"
         case .eclipse:            return "circle.lefthalf.filled"
         case .season:             return "leaf.fill"
+        case .deepSky:            return "hurricane"
         case .other:              return "sparkle"
         }
     }
@@ -219,12 +222,92 @@ enum EventsCatalog {
                 visibility: "Marks the start of astronomical winter or summer depending on hemisphere.",
                 window: "Around December 21–22."
             )
+        ),
+
+        // ── Seasonal deep-sky highlights (nebulae, galaxies, clusters) ───────
+        // Overlapping windows so most nights surface at least one target.
+        RecurringEntry(
+            startMonth: 11, startDay: 15, endMonth: 3, endDay: 20,
+            event: AstronomicalEvent(
+                id: "orion-nebula",
+                title: "Orion Nebula (M42)",
+                category: .deepSky,
+                summary: "A vast stellar nursery 1,344 light-years away, glowing in Orion's Sword. Visible to the naked eye as a fuzzy patch and stunning through binoculars.",
+                visibility: "High in the southern evening sky through winter. Look just below Orion's Belt.",
+                window: "Best Nov–Mar, evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 10, startDay: 15, endMonth: 3, endDay: 1,
+            event: AstronomicalEvent(
+                id: "pleiades",
+                title: "Pleiades (M45)",
+                category: .deepSky,
+                summary: "The 'Seven Sisters' — a brilliant young open star cluster ~440 light-years away, unmistakable as a tiny dipper of blue-white stars.",
+                visibility: "Rises in the east after sunset and climbs high overhead in winter. Naked-eye from dark skies.",
+                window: "Best Oct–Feb, evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 8, startDay: 15, endMonth: 12, endDay: 20,
+            event: AstronomicalEvent(
+                id: "andromeda-galaxy",
+                title: "Andromeda Galaxy (M31)",
+                category: .deepSky,
+                summary: "The nearest large spiral galaxy, 2.5 million light-years away — the most distant object visible to the unaided eye, spanning several Moon-widths.",
+                visibility: "High in the autumn sky. Find it off the corner of the Great Square of Pegasus on a moonless night.",
+                window: "Best Sep–Dec, evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 2, startDay: 1, endMonth: 5, endDay: 10,
+            event: AstronomicalEvent(
+                id: "beehive-cluster",
+                title: "Beehive Cluster (M44)",
+                category: .deepSky,
+                summary: "A swarm of around a thousand stars in Cancer, ~580 light-years away. A faint glow to the eye that resolves into dozens of stars in binoculars.",
+                visibility: "Well placed high in the south on spring evenings, between Gemini and Leo.",
+                window: "Best Feb–Apr, evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 4, startDay: 20, endMonth: 9, endDay: 1,
+            event: AstronomicalEvent(
+                id: "hercules-cluster",
+                title: "Hercules Cluster (M13)",
+                category: .deepSky,
+                summary: "The finest globular cluster of the northern sky — several hundred thousand ancient stars packed into a glowing ball ~25,000 light-years away.",
+                visibility: "Rises in the east in late spring and rides high overhead in summer, in the Keystone of Hercules.",
+                window: "Best May–Aug, late evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 6, startDay: 1, endMonth: 9, endDay: 20,
+            event: AstronomicalEvent(
+                id: "lagoon-nebula",
+                title: "Lagoon Nebula (M8)",
+                category: .deepSky,
+                summary: "A bright emission nebula and star-forming region in Sagittarius, ~4,000 light-years away, set against the rich star clouds of the Milky Way's core.",
+                visibility: "Low in the south on summer nights, toward the heart of the Milky Way. Best from dark skies.",
+                window: "Best Jun–Sep, late evening."
+            )
+        ),
+        RecurringEntry(
+            startMonth: 7, startDay: 1, endMonth: 10, endDay: 25,
+            event: AstronomicalEvent(
+                id: "ring-nebula",
+                title: "Ring Nebula (M57)",
+                category: .deepSky,
+                summary: "A dying star's exhaled shell of gas — a tiny smoke-ring of light ~2,600 light-years away in Lyra. A telescope target near brilliant Vega.",
+                visibility: "High overhead on summer and autumn evenings, between the two southern stars of Lyra.",
+                window: "Best Jul–Oct, evening."
+            )
         )
     ]
 
     // MARK: - Moon phase copy
 
-    private static func moonPhaseSummary(_ name: MoonPhase.Name) -> String {
+    static func moonPhaseSummary(_ name: MoonPhase.Name) -> String {
         switch name {
         case .newMoon:        return "The Moon is between the Earth and the Sun, with its illuminated side facing away from us. This is the darkest time of the lunar month — perfect for observing faint stars and the Milky Way."
         case .waxingCrescent: return "A thin crescent grows on the right (in the Northern Hemisphere), visible in the western sky after sunset."
@@ -237,7 +320,7 @@ enum EventsCatalog {
         }
     }
 
-    private static func moonPhaseVisibility(_ name: MoonPhase.Name) -> String {
+    static func moonPhaseVisibility(_ name: MoonPhase.Name) -> String {
         switch name {
         case .newMoon, .waxingCrescent:  return "Best observed shortly after sunset, low in the western sky."
         case .firstQuarter:              return "Visible from afternoon through midnight, high in the south at sunset."
