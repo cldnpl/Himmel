@@ -49,7 +49,7 @@ final class SkyViewModel {
 
     /// Resolved positions for the current date+location, used by the AR layer.
     private(set) var resolvedObjects: [ResolvedSkyObject] = []
-    private(set) var resolvedConstellations: [Constellation] = []
+    private(set) var resolvedConstellations: [ResolvedConstellation] = []
     private(set) var moonSnapshot: MoonPhase.Snapshot = MoonPhase.phase(at: Date())
 
     /// Cache so we know which star catalog entry maps to which resolved horizontal coord.
@@ -107,6 +107,9 @@ final class SkyViewModel {
         var starPos: [String: HorizontalCoordinate] = [:]
         stars.reserveCapacity(StarCatalog.stars.count)
         starPos.reserveCapacity(StarCatalog.stars.count)
+        // Occupied 0.5°-grid cells, so constellation vertices that coincide with a
+        // named catalog star don't get a second, duplicate dot stacked on top.
+        var occupiedCells = Set<Int>()
         for star in StarCatalog.stars {
             guard let eq = star.equatorial else { continue }
             let horiz = AstronomicalMath.horizontal(
@@ -117,6 +120,41 @@ final class SkyViewModel {
             )
             stars.append(ResolvedSkyObject(object: star, horizontal: horiz))
             starPos[star.id] = horiz
+            occupiedCells.insert(Self.gridCell(raHours: eq.rightAscensionHours, decDegrees: eq.declinationDegrees))
+        }
+
+        // Constellation vertex stars: a tappable dot at every stick-figure vertex
+        // across all 88 IAU figures, deduplicated against named stars and each
+        // other. Magnitude is set above the 3.6 floating-label threshold so they
+        // render as quiet dots; the "Star in <Constellation>" copy shows on tap.
+        for constellation in ConstellationCatalog.all {
+            for path in constellation.paths {
+                for point in path {
+                    let cell = Self.gridCell(raHours: point.raHours, decDegrees: point.decDegrees)
+                    guard occupiedCells.insert(cell).inserted else { continue }
+                    let eq = point.equatorial
+                    let horiz = AstronomicalMath.horizontal(
+                        from: eq,
+                        at: now,
+                        latitudeDegrees: coord.latitude,
+                        longitudeDegrees: coord.longitude
+                    )
+                    let id = "cvx-\(cell)"
+                    let obj = CelestialObject(
+                        id: id,
+                        name: "\(constellation.name) Star",
+                        type: .star,
+                        equatorial: eq,
+                        magnitude: 4.5,
+                        designation: nil,
+                        subtitle: "Star in \(constellation.name)",
+                        summary: "One of the stars that trace the figure of \(constellation.name).",
+                        facts: []
+                    )
+                    stars.append(ResolvedSkyObject(object: obj, horizontal: horiz))
+                    starPos[id] = horiz
+                }
+            }
         }
 
         // Sun, Moon, and naked-eye planets.
@@ -145,8 +183,59 @@ final class SkyViewModel {
 
         self.resolvedObjects = stars + bodies
         self.starPositions = starPos
-        self.resolvedConstellations = ConstellationCatalog.all
+        self.resolvedConstellations = Self.resolveConstellations(
+            at: now,
+            latitudeDegrees: coord.latitude,
+            longitudeDegrees: coord.longitude
+        )
         self.moonSnapshot = MoonPhase.phase(at: now)
+    }
+
+    /// Pack an RA/Dec position into a single integer key on a ~0.5° grid, used to
+    /// deduplicate coincident stars. RA is converted to degrees (×15) so the cell
+    /// size is uniform on the sky near the equator.
+    private static func gridCell(raHours: Double, decDegrees: Double) -> Int {
+        let raDeg = raHours * 15.0
+        let raIndex = Int((raDeg * 2.0).rounded())          // 0.5° bins, 0…720
+        let decIndex = Int(((decDegrees + 90.0) * 2.0).rounded()) // 0.5° bins, 0…360
+        return raIndex * 1000 + decIndex
+    }
+
+    /// Resolve every catalog constellation's RA/Dec stick-figure into horizontal
+    /// line segments for the given observer + instant. Each polyline becomes a
+    /// chain of endpoint-to-endpoint segments.
+    private static func resolveConstellations(
+        at date: Date,
+        latitudeDegrees: Double,
+        longitudeDegrees: Double
+    ) -> [ResolvedConstellation] {
+        ConstellationCatalog.all.map { c in
+            var segments: [ResolvedConstellation.Segment] = []
+            for path in c.paths where path.count >= 2 {
+                var prev = AstronomicalMath.horizontal(
+                    from: path[0].equatorial,
+                    at: date,
+                    latitudeDegrees: latitudeDegrees,
+                    longitudeDegrees: longitudeDegrees
+                )
+                for idx in 1..<path.count {
+                    let cur = AstronomicalMath.horizontal(
+                        from: path[idx].equatorial,
+                        at: date,
+                        latitudeDegrees: latitudeDegrees,
+                        longitudeDegrees: longitudeDegrees
+                    )
+                    segments.append(.init(a: prev, b: cur))
+                    prev = cur
+                }
+            }
+            return ResolvedConstellation(
+                id: c.id,
+                name: c.name,
+                summary: c.summary,
+                segments: segments
+            )
+        }
     }
 
     // MARK: - Selection
@@ -172,8 +261,7 @@ final class SkyViewModel {
                 subtitle: "Recognizable star pattern",
                 summary: match.summary,
                 facts: [
-                    "Line segments: \(match.lines.count)",
-                    "Anchor stars: \(match.anchorStarIds.count)"
+                    "Line segments: \(match.segments.count)"
                 ]
             )
         }
@@ -279,8 +367,7 @@ final class SkyViewModel {
                 subtitle: "Recognizable star pattern",
                 summary: constellation.summary,
                 facts: [
-                    "Line segments: \(constellation.lines.count)",
-                    "Anchor stars: \(constellation.anchorStarIds.count)"
+                    "Line segments: \(constellation.segments.count)"
                 ]
             )
             candidates.append(NavigationCandidate(object: object, aliases: [
@@ -312,6 +399,8 @@ final class SkyViewModel {
         case .mars:    return "The Red Planet"
         case .jupiter: return "The largest planet in the solar system"
         case .saturn:  return "The ringed gas giant"
+        case .uranus:  return "The tilted ice giant"
+        case .neptune: return "The windiest planet — most distant from the Sun"
         }
     }
 
@@ -331,25 +420,34 @@ final class SkyViewModel {
             return "A gas giant more massive than all other planets combined. Visible as a bright steady point with at least four moons resolvable in binoculars."
         case .saturn:
             return "Best known for its spectacular rings of ice and rock. A small telescope reveals them clearly, even at magnifications around 30×."
+        case .uranus:
+            return "An ice giant that rotates almost on its side, likely after an ancient collision. Just barely visible to the naked eye under very dark skies as a faint blue-green point."
+        case .neptune:
+            return "The most distant major planet, a deep-blue ice giant with the fiercest winds in the solar system. Never visible to the unaided eye — binoculars or a telescope are required."
         }
     }
 
     private func facts(for body: PlanetEphemeris.Body, at date: Date) -> [String] {
+        let base: [String]
         switch body {
         case .moon:
             let phase = MoonPhase.phase(at: date)
-            return [
+            base = [
                 "Phase: \(phase.name.rawValue)",
                 String(format: "Illumination: %.0f%%", phase.illumination * 100),
                 "Mean distance: 384,400 km"
             ]
         case .sun:
-            return ["Distance: 1 AU (≈150 million km)", "Spectral type: G2 V"]
-        case .mercury: return ["Diameter: 4,879 km", "Orbital period: 88 Earth days"]
-        case .venus:   return ["Diameter: 12,104 km", "Orbital period: 225 Earth days"]
-        case .mars:    return ["Diameter: 6,779 km", "Orbital period: 687 Earth days"]
-        case .jupiter: return ["Diameter: 139,820 km", "Orbital period: 11.9 Earth years"]
-        case .saturn:  return ["Diameter: 116,460 km", "Orbital period: 29.5 Earth years"]
+            base = ["Distance: 1 AU (≈150 million km)", "Spectral type: G2 V"]
+        case .mercury: base = ["Diameter: 4,879 km", "Orbital period: 88 Earth days"]
+        case .venus:   base = ["Diameter: 12,104 km", "Orbital period: 225 Earth days"]
+        case .mars:    base = ["Diameter: 6,779 km", "Orbital period: 687 Earth days"]
+        case .jupiter: base = ["Diameter: 139,820 km", "Orbital period: 11.9 Earth years"]
+        case .saturn:  base = ["Diameter: 116,460 km", "Orbital period: 29.5 Earth years"]
+        case .uranus:  base = ["Diameter: 50,724 km", "Orbital period: 84 Earth years"]
+        case .neptune: base = ["Diameter: 49,244 km", "Orbital period: 165 Earth years"]
         }
+        // Append moon-system info for planets that have satellites.
+        return base + SatelliteCatalog.facts(for: body)
     }
 }

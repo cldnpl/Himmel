@@ -443,7 +443,6 @@ final class SkySceneCoordinator: NSObject {
         renderStars(state.resolvedObjects)
         renderBodies(state.resolvedObjects, moonPhase: state.moonSnapshot)
         renderConstellations(state.resolvedConstellations,
-                             starPositions: state.starPositions,
                              enabled: state.showConstellations)
         renderSelectionHalo(for: state.selectedObject, in: state.resolvedObjects)
         rebuildNavigationTargetPositions(state: state)
@@ -483,7 +482,7 @@ final class SkySceneCoordinator: NSObject {
 
         if state.showConstellations {
             for c in state.resolvedConstellations {
-                if let centroid = SkyNodeFactory.constellationCentroid(c, starPositions: state.starPositions) {
+                if let centroid = SkyNodeFactory.constellationCentroid(c) {
                     out.append(SkyLabel(id: "L-con-\(c.id)", world: centroid, text: c.name, kind: .constellation))
                 }
             }
@@ -509,44 +508,12 @@ final class SkySceneCoordinator: NSObject {
         }
 
         for constellation in state.resolvedConstellations {
-            guard let centroid = navigationCentroid(
-                for: constellation,
-                starPositions: state.starPositions
-            ) else { continue }
+            guard let centroid = SkyNodeFactory.constellationCentroid(constellation)
+            else { continue }
             positions["constellation-\(constellation.id)"] = centroid
         }
 
         navigationTargetPositions = positions
-    }
-
-    private func navigationCentroid(
-        for constellation: Constellation,
-        starPositions: [String: HorizontalCoordinate]
-    ) -> SIMD3<Float>? {
-        var sum = SIMD3<Float>(0, 0, 0)
-        var count: Float = 0
-
-        for id in constellation.anchorStarIds {
-            guard let horizontal = starPositions[id] else { continue }
-            sum += horizontal.worldDirection
-            count += 1
-        }
-
-        if count == 0 {
-            for segment in constellation.lines {
-                if let a = starPositions[segment.starA] {
-                    sum += a.worldDirection
-                    count += 1
-                }
-                if let b = starPositions[segment.starB] {
-                    sum += b.worldDirection
-                    count += 1
-                }
-            }
-        }
-
-        guard count > 0 else { return nil }
-        return simd_normalize(sum / count) * SkyNodeFactory.sphereRadius
     }
 
     private func renderStars(_ resolved: [ResolvedSkyObject]) {
@@ -739,8 +706,7 @@ final class SkySceneCoordinator: NSObject {
     }
 
     private func renderConstellations(
-        _ constellations: [Constellation],
-        starPositions: [String: HorizontalCoordinate],
+        _ constellations: [ResolvedConstellation],
         enabled: Bool
     ) {
         if !enabled {
@@ -754,7 +720,7 @@ final class SkySceneCoordinator: NSObject {
         }
         for c in constellations {
             constellationNodes[c.id]?.removeFromParentNode()
-            if let node = SkyNodeFactory.makeConstellationGroup(c, starPositions: starPositions) {
+            if let node = SkyNodeFactory.makeConstellationGroup(c) {
                 constellationsContainer.addChildNode(node)
                 constellationNodes[c.id] = node
             }

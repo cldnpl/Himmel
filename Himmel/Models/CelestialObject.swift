@@ -150,19 +150,46 @@ struct CelestialObject: Identifiable, Hashable {
     }
 }
 
-/// One drawn line of a constellation, connecting two stars by their catalog IDs.
-struct ConstellationLine: Hashable {
-    let starA: String
-    let starB: String
+/// One vertex of a constellation stick-figure, in J2000 equatorial coordinates.
+///
+/// Keeping the figure in RA/Dec (instead of referencing star IDs in
+/// `StarCatalog`) lets Himmel draw all 88 IAU constellations without requiring
+/// every asterism star to also exist as a tappable catalog entry. Each point is
+/// resolved to horizontal coords at runtime for the observer's place + time.
+struct SkyPoint: Hashable {
+    /// Right ascension in hours (0..<24).
+    let raHours: Double
+    /// Declination in degrees (-90...+90).
+    let decDegrees: Double
+
+    var equatorial: EquatorialCoordinate {
+        EquatorialCoordinate(rightAscensionHours: raHours, declinationDegrees: decDegrees)
+    }
 }
 
-/// Constellation metadata. Tap-targeting happens on its anchor star(s).
+/// Constellation metadata + stick-figure geometry.
+///
+/// `paths` is a set of polylines: each inner array is an ordered chain of
+/// vertices connected end-to-end. A constellation may need several disjoint
+/// polylines (e.g. Orion's belt vs. his shoulders), hence an array of arrays.
 struct Constellation: Identifiable, Hashable {
     let id: String
     let name: String
     let summary: String
-    let lines: [ConstellationLine]
-    /// IDs of the brightest stars in the asterism — used to place the label
-    /// and to attach a tap target if needed.
-    let anchorStarIds: [String]
+    let paths: [[SkyPoint]]
+}
+
+/// A constellation whose vertices have been resolved to horizontal coordinates
+/// for a specific observer + instant, ready to draw / label / navigate to.
+struct ResolvedConstellation: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let summary: String
+    let segments: [Segment]
+
+    /// One drawn line, both endpoints already in horizontal coordinates.
+    struct Segment: Hashable {
+        let a: HorizontalCoordinate
+        let b: HorizontalCoordinate
+    }
 }

@@ -85,26 +85,18 @@ enum SkyNodeFactory {
     // MARK: - Constellation lines + names
 
     static func makeConstellationGroup(
-        _ constellation: Constellation,
-        starPositions: [String: HorizontalCoordinate]
+        _ constellation: ResolvedConstellation
     ) -> SCNNode? {
         var vertices: [SCNVector3] = []
         var indices: [Int32] = []
         var i: Int32 = 0
-        var anchorSum = SIMD3<Float>(0, 0, 0)
-        var anchorCount: Float = 0
-        for segment in constellation.lines {
-            guard let a = starPositions[segment.starA],
-                  let b = starPositions[segment.starB] else { continue }
+        for segment in constellation.segments {
+            let a = segment.a
+            let b = segment.b
             guard a.altitudeDegrees > -3 && b.altitudeDegrees > -3 else { continue }
-            let pa = position(for: a)
-            let pb = position(for: b)
-            vertices.append(pa)
-            vertices.append(pb)
+            vertices.append(position(for: a))
+            vertices.append(position(for: b))
             indices.append(i); indices.append(i + 1); i += 2
-            anchorSum += SIMD3<Float>(pa.x, pa.y, pa.z)
-            anchorSum += SIMD3<Float>(pb.x, pb.y, pb.z)
-            anchorCount += 2
         }
         guard !indices.isEmpty else { return nil }
 
@@ -135,14 +127,13 @@ enum SkyNodeFactory {
     /// asterism, used by the overlay to place the constellation name. Returns nil
     /// if no segment is above the horizon.
     static func constellationCentroid(
-        _ constellation: Constellation,
-        starPositions: [String: HorizontalCoordinate]
+        _ constellation: ResolvedConstellation
     ) -> SIMD3<Float>? {
         var sum = SIMD3<Float>(0, 0, 0)
         var count: Float = 0
-        for segment in constellation.lines {
-            guard let a = starPositions[segment.starA],
-                  let b = starPositions[segment.starB] else { continue }
+        for segment in constellation.segments {
+            let a = segment.a
+            let b = segment.b
             guard a.altitudeDegrees > -3 && b.altitudeDegrees > -3 else { continue }
             sum += a.worldDirection
             sum += b.worldDirection
@@ -556,6 +547,12 @@ private enum SpriteCache {
             case "Saturn":
                 return (UIColor(red: 0.96, green: 0.85, blue: 0.62, alpha: 1),
                         UIColor(red: 0.96, green: 0.85, blue: 0.62, alpha: 0.40), true)
+            case "Uranus":
+                return (UIColor(red: 0.65, green: 0.86, blue: 0.90, alpha: 1),
+                        UIColor(red: 0.65, green: 0.86, blue: 0.90, alpha: 0.45), false)
+            case "Neptune":
+                return (UIColor(red: 0.45, green: 0.55, blue: 0.95, alpha: 1),
+                        UIColor(red: 0.45, green: 0.55, blue: 0.95, alpha: 0.45), false)
             default:
                 return (.white, UIColor(white: 1, alpha: 0.4), false)
             }

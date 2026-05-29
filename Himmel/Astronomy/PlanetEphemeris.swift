@@ -13,7 +13,7 @@ import Foundation
 enum PlanetEphemeris {
 
     enum Body: String, CaseIterable {
-        case sun, moon, mercury, venus, mars, jupiter, saturn
+        case sun, moon, mercury, venus, mars, jupiter, saturn, uranus, neptune
 
         var displayName: String {
             switch self {
@@ -24,6 +24,8 @@ enum PlanetEphemeris {
             case .mars:    return "Mars"
             case .jupiter: return "Jupiter"
             case .saturn:  return "Saturn"
+            case .uranus:  return "Uranus"
+            case .neptune: return "Neptune"
             }
         }
 
@@ -137,6 +139,24 @@ enum PlanetEphemeris {
                 a: 9.55475,
                 e: 0.055546 - 9.499e-9 * d,
                 M: normDeg(316.9670 + 0.033_444_2282 * d)
+            )
+        case .uranus:
+            return OrbitalElements(
+                N: normDeg(74.0005 + 1.3978e-5 * d),
+                i: 0.7733 + 1.9e-8 * d,
+                w: normDeg(96.6612 + 3.0565e-5 * d),
+                a: 19.18171 - 1.55e-8 * d,
+                e: 0.047318 + 7.45e-9 * d,
+                M: normDeg(142.5905 + 0.011_725_806 * d)
+            )
+        case .neptune:
+            return OrbitalElements(
+                N: normDeg(131.7806 + 3.0173e-5 * d),
+                i: 1.7700 - 2.55e-7 * d,
+                w: normDeg(272.8461 - 6.027e-6 * d),
+                a: 30.05826 + 3.313e-8 * d,
+                e: 0.008606 + 2.15e-9 * d,
+                M: normDeg(260.2471 + 0.005_995_147 * d)
             )
         default:
             return OrbitalElements(N: 0, i: 0, w: 0, a: 1, e: 0, M: 0)
