@@ -84,6 +84,27 @@ enum SkyNodeFactory {
 
     // MARK: - Constellation lines + names
 
+    /// KVC key toggling the constellation horizon fade (0 = off, 1 = on).
+    static let horizonFadeKey = "horizonFade"
+
+    /// Surface modifier mirroring `SkyDome.horizonClipModifier`: fades the
+    /// asterism lines out just below the horizon so they stop bleeding over the
+    /// real ground/buildings in Live AR. The line material is ADDITIVE, so we
+    /// must scale the COLOUR toward zero (not just alpha) — additive blending
+    /// adds rgb regardless of alpha. `horizonFade` is driven by the coordinator.
+    private static let lineHorizonClipModifier = """
+    #pragma arguments
+    float horizonFade;
+    #pragma body
+    float3 worldDir = normalize((scn_frame.inverseViewTransform * float4(_surface.position, 1.0)).xyz);
+    float clipped = smoothstep(-0.04, 0.06, worldDir.z);
+    half hf = half(mix(1.0, clipped, horizonFade));
+    _surface.diffuse.rgb *= hf;
+    _surface.diffuse.a   *= hf;
+    _surface.emission.rgb *= hf;
+    _surface.emission.a   *= hf;
+    """
+
     static func makeConstellationGroup(
         _ constellation: ResolvedConstellation
     ) -> SCNNode? {
@@ -114,6 +135,10 @@ enum SkyNodeFactory {
         lineMat.writesToDepthBuffer = false
         lineMat.readsFromDepthBuffer = false
         lineMat.blendMode = .add
+        // Horizon masking layer: off by default, switched on in Live AR by the
+        // coordinator so lines fade at the horizon instead of overlaying ground.
+        lineMat.shaderModifiers = [.surface: lineHorizonClipModifier]
+        lineMat.setValue(NSNumber(value: 0.0), forKey: horizonFadeKey)
         lineGeom.firstMaterial = lineMat
         let lineNode = SCNNode(geometry: lineGeom)
         lineNode.renderingOrder = -50

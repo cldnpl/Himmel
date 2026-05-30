@@ -51,6 +51,14 @@ final class SkySceneCoordinator: NSObject {
     private var starNodes: [String: SCNNode] = [:]
     private var bodyNodes: [String: SCNNode] = [:]
     private var constellationNodes: [String: SCNNode] = [:]
+
+    /// Magnitude-LOD: the "Sky Guide" reveal. The controller holds the pure
+    /// FOV→magnitude math; `starLODMeta` carries each star's magnitude + base
+    /// opacity so we never depend on undefined-key KVC storage on SCNNode.
+    private let starLOD = StarLODController()
+    private var starLODMeta: [String: StarLODController.StarLOD] = [:]
+    /// FOV captured at the start of a pinch, so zoom is relative to that anchor.
+    private var pinchStartFOV: CGFloat = 75
     private var selectionHaloNode: SCNNode?
     private let navigationSolver = SkyNavigationSolver()
     private var navigationTargetPositions: [String: SIMD3<Float>] = [:]
@@ -74,7 +82,9 @@ final class SkySceneCoordinator: NSObject {
     private var isLiveARMode = false
     private var arShowVirtualSky = false
     private var liveARPointingAtSky = false
-    private let virtualFOV: CGFloat = 75
+    /// Current virtual-sky FOV. Mutable so pinch-to-zoom persists across AR
+    /// toggles. Clamped to the LOD controller's calibrated [narrow, wide] band.
+    private var virtualFOV: CGFloat = 75
 
     private var lastRenderSignature: Int = 0
 
@@ -160,6 +170,11 @@ final class SkySceneCoordinator: NSObject {
         // Tap recognizer
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         scnView.addGestureRecognizer(tap)
+
+        // Pinch-to-zoom drives the camera FOV (and therefore the magnitude LOD).
+        // Coexists with the tap: a tap fails the moment the fingers spread.
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        scnView.addGestureRecognizer(pinch)
     }
 
     // MARK: - Lifecycle
@@ -220,6 +235,8 @@ final class SkySceneCoordinator: NSObject {
                 labelOverlay.cullBelowHorizon = true
             }
         }
+        applyStarLOD()   // FOV just changed (virtual ↔ AR) → refresh the cutoff.
+        setConstellationHorizonClip(isLiveARMode)   // fade asterisms at the horizon in AR
         applyHorizonCulling()
         refreshAROverlayGating()
     }
@@ -231,6 +248,21 @@ final class SkySceneCoordinator: NSObject {
         let cull = isLiveARMode
         for (_, node) in starNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
         for (_, node) in bodyNodes { node.isHidden = cull && node.simdWorldPosition.z < 0 }
+    }
+
+    /// Toggle the constellation lines' below-horizon fade. Static masking only:
+    /// it confines asterisms to the sky hemisphere so they don't bleed over the
+    /// real ground/buildings in Live AR. It does NOT occlude arbitrary real
+    /// structures — that would require an ARSession depth source this pipeline
+    /// (AVCapture passthrough + CoreMotion) does not produce.
+    private func setConstellationHorizonClip(_ enabled: Bool) {
+        let value = NSNumber(value: enabled ? 1.0 : 0.0)
+        for (_, group) in constellationNodes {
+            group.enumerateChildNodes { child, _ in
+                child.geometry?.firstMaterial?
+                    .setValue(value, forKey: SkyNodeFactory.horizonFadeKey)
+            }
+        }
     }
 
     /// Toggle the dome's below-horizon fade (see `SkyDome.horizonClipModifier`).
@@ -400,6 +432,38 @@ final class SkySceneCoordinator: NSObject {
         // LAYER 3 — constellation lines/labels: intentionally NOT hit-tested.
     }
 
+    // MARK: - Pinch-to-zoom → magnitude LOD ("Sky Guide" reveal)
+
+    /// Pinch out (scale > 1) narrows the FOV (zoom in) and reveals fainter stars;
+    /// pinch in widens it back to bright anchors only. In Live AR the FOV must
+    /// match the real camera, so zoom is disabled there.
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        guard !isLiveARMode else { return }
+        switch g.state {
+        case .began:
+            pinchStartFOV = cameraNode.camera?.fieldOfView ?? virtualFOV
+        case .changed:
+            // FOV is inversely proportional to zoom: spreading fingers shrinks it.
+            let proposed = pinchStartFOV / CGFloat(g.scale)
+            let lo = CGFloat(starLOD.config.narrowFOV)
+            let hi = CGFloat(starLOD.config.wideFOV)
+            virtualFOV = min(max(proposed, lo), hi)
+            cameraNode.camera?.fieldOfView = virtualFOV
+            applyStarLOD()
+        default:
+            break
+        }
+    }
+
+    /// Re-evaluate every star's opacity for the current FOV. Cheap (a few hundred
+    /// sprites) and called only on zoom change / star rebuild — never per frame.
+    /// Writes opacity only, so it composes cleanly with `applyHorizonCulling`
+    /// (which owns isHidden) and never touches constellations/bodies/labels.
+    private func applyStarLOD() {
+        let fov = Double(cameraNode.camera?.fieldOfView ?? virtualFOV)
+        starLOD.apply(toStarNodes: starNodes, metadata: starLODMeta, fov: fov)
+    }
+
     /// Returns the id of the node whose world direction is closest to `ray`,
     /// provided it lies within `toleranceDegrees` of it. Camera is at the sphere
     /// centre, so each node's direction is `worldPosition − cameraPos`.
@@ -522,6 +586,7 @@ final class SkySceneCoordinator: NSObject {
         for (id, node) in starNodes where !newIDs.contains(id) {
             node.removeFromParentNode()
             starNodes.removeValue(forKey: id)
+            starLODMeta.removeValue(forKey: id)
         }
         for s in stars {
             if let existing = starNodes[s.id] {
@@ -531,8 +596,20 @@ final class SkySceneCoordinator: NSObject {
                 let node = SkyNodeFactory.makeStar(resolved: s)
                 starsContainer.addChildNode(node)
                 starNodes[s.id] = node
+
+                // Capture LOD inputs. Stars without a catalog magnitude (e.g.
+                // constellation-vertex dots) default to 4.5 — naked-eye faint,
+                // so they fade out first as you zoom back out.
+                let mag = s.object.magnitude ?? 4.5
+                starLODMeta[s.id] = StarLODController.StarLOD(
+                    magnitude: mag,
+                    baseIntensity: StarLODController.baseIntensity(forMagnitude: mag)
+                )
             }
         }
+
+        // Newly built/repositioned stars must adopt the current zoom's cutoff.
+        applyStarLOD()
     }
 
     private func renderBodies(_ resolved: [ResolvedSkyObject], moonPhase: MoonPhase.Snapshot) {
@@ -725,6 +802,8 @@ final class SkySceneCoordinator: NSObject {
                 constellationNodes[c.id] = node
             }
         }
+        // Rebuilt groups default to fade-off; adopt the current Live AR state.
+        setConstellationHorizonClip(isLiveARMode)
     }
 
     private func renderSelectionHalo(

@@ -7,7 +7,7 @@
 //
 //   1. Recurring date windows (meteor showers, equinoxes/solstices) — defined by
 //      month/day and matched against the current date.
-//   2. Computed events (current moon phase) — derived at runtime.
+//   2. Computed events (currexrnt moon phase) — derived at runtime.
 //
 //  For MVP we use a static recurring dataset. A later milestone can fetch live
 //  data (ISS passes, eclipses) from a remote service.
