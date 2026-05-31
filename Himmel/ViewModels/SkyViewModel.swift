@@ -69,6 +69,12 @@ final class SkyViewModel {
     func start() {
         guard !didStart else { return }
         didStart = true
+        // Recompute the instant a real location arrives (cached fix on launch, or
+        // the first live GPS update) so the sky is correct immediately instead of
+        // opening at the fallback location and visibly jumping on the next tick.
+        locationService.onCoordinateChange = { [weak self] in
+            self?.tick()
+        }
         locationService.start()
         recompute()
         // Refresh every 5s — celestial sphere drifts ~1°/4min, so this is generous.
@@ -81,6 +87,7 @@ final class SkyViewModel {
     func stop() {
         timer?.invalidate()
         timer = nil
+        locationService.onCoordinateChange = nil
         didStart = false
     }
 

@@ -27,9 +27,21 @@ nonisolated final class LocationService: NSObject, CLLocationManagerDelegate, @u
     @MainActor var status: Status = .notDetermined
     @MainActor var placeLabel: String?
 
+    /// Fired on the main actor whenever `coordinate` is (re)assigned — including
+    /// the immediate seed from the cached/persisted last fix on launch. The sky
+    /// view model uses this to recompute positions the instant a real location is
+    /// known, instead of waiting for its periodic timer (which made the sky open
+    /// at the fallback 0,0 location and then visibly jump seconds later).
+    @MainActor var onCoordinateChange: (() -> Void)?
+
     private let manager = CLLocationManager()
     nonisolated(unsafe) private var didStart = false
     nonisolated(unsafe) private var lastGeocodedCoord: CLLocationCoordinate2D?
+
+    /// UserDefaults keys for persisting the last good coordinate across launches,
+    /// so even a cold start (before the first GPS fix) paints a near-correct sky.
+    private static let kLastLat = "Himmel.lastLatitude"
+    private static let kLastLon = "Himmel.lastLongitude"
 
     override init() {
         super.init()
@@ -37,7 +49,15 @@ nonisolated final class LocationService: NSObject, CLLocationManagerDelegate, @u
         manager.desiredAccuracy = kCLLocationAccuracyKilometer
         manager.distanceFilter = 250
         let initial = manager.authorizationStatus
-        Task { @MainActor in self.applyAuthorization(initial) }
+        // Seed the last-known coordinate from disk so the very first recompute on
+        // launch uses a realistic location rather than the 0,0 fallback.
+        let persisted = Self.loadPersistedCoordinate()
+        Task { @MainActor in
+            self.applyAuthorization(initial)
+            if let persisted, self.coordinate == nil {
+                self.coordinate = persisted
+            }
+        }
     }
 
     /// Asks for permission if needed and starts updates. Safe to call repeatedly.
@@ -50,6 +70,12 @@ nonisolated final class LocationService: NSObject, CLLocationManagerDelegate, @u
             manager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse, .authorizedAlways:
             manager.startUpdatingLocation()
+            // CoreLocation often has a cached fix available immediately — adopt it
+            // now so the first sky render is already at the right place, well
+            // before `didUpdateLocations` delivers a fresh fix.
+            if let cached = manager.location?.coordinate {
+                adopt(coordinate: cached)
+            }
         default:
             break
         }
@@ -85,9 +111,43 @@ nonisolated final class LocationService: NSObject, CLLocationManagerDelegate, @u
         }
         if shouldGeocode { lastGeocodedCoord = coord }
         Task { @MainActor in
-            self.coordinate = coord
+            self.adopt(coordinate: coord)
             if shouldGeocode { self.reverseGeocode(location: location) }
         }
+    }
+
+    /// Publish a new coordinate, persist it for the next cold start, and notify the
+    /// observer so the sky recomputes immediately. Skips no-op reassignments of the
+    /// same point to avoid redundant recomputes.
+    @MainActor
+    private func adopt(coordinate coord: CLLocationCoordinate2D) {
+        if let current = coordinate,
+           current.latitude == coord.latitude,
+           current.longitude == coord.longitude {
+            return
+        }
+        coordinate = coord
+        Self.persist(coordinate: coord)
+        onCoordinateChange?()
+    }
+
+    // MARK: - Persistence
+
+    private static func persist(coordinate coord: CLLocationCoordinate2D) {
+        let defaults = UserDefaults.standard
+        defaults.set(coord.latitude, forKey: kLastLat)
+        defaults.set(coord.longitude, forKey: kLastLon)
+    }
+
+    private static func loadPersistedCoordinate() -> CLLocationCoordinate2D? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: kLastLat) != nil,
+              defaults.object(forKey: kLastLon) != nil else { return nil }
+        let lat = defaults.double(forKey: kLastLat)
+        let lon = defaults.double(forKey: kLastLon)
+        guard CLLocationCoordinate2DIsValid(CLLocationCoordinate2D(latitude: lat, longitude: lon)),
+              !(lat == 0 && lon == 0) else { return nil }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

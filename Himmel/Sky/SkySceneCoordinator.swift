@@ -79,6 +79,19 @@ final class SkySceneCoordinator: NSObject {
     let cameraPassthrough = CameraPassthrough()
     /// The camera preview view to insert BEHIND the SCNView in the container.
     var cameraPreviewView: UIView { cameraPassthrough.previewView }
+
+    /// Classifies live camera frames into a "sky" alpha mask so the overlay can be
+    /// clipped to the real sky. Inert when no CoreML model is bundled.
+    private let skySegmenter = SkySegmenter()
+    /// CALayer masks driven by `skySegmenter`. One per masked sibling view (the 3D
+    /// overlay and the screen-space labels) — a CALayer mask can't be shared. They
+    /// start opaque-white (fully visible) so nothing is hidden before the first
+    /// segmentation result lands. The camera preview is intentionally NOT masked.
+    private let scnMaskLayer = CALayer()
+    private let labelMaskLayer = CALayer()
+    /// Whether sky-masking is currently engaged (real-sky AR + a usable model).
+    private var skyMaskActive = false
+
     private var isLiveARMode = false
     private var arShowVirtualSky = false
     private var liveARPointingAtSky = false
@@ -175,6 +188,63 @@ final class SkySceneCoordinator: NSObject {
         // Coexists with the tap: a tap fails the moment the fingers spread.
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         scnView.addGestureRecognizer(pinch)
+
+        configureSkyMasking()
+    }
+
+    // MARK: - Sky masking (Live AR)
+
+    /// Prepare the segmentation-driven masks. Both mask layers fill their host with
+    /// `resizeAspectFill` — identical to the camera preview's gravity — so the mask
+    /// crops exactly like the displayed video and the overlay is clipped to the same
+    /// on-screen sky pixels. They begin opaque (visible) until the first mask lands.
+    private func configureSkyMasking() {
+        for mask in [scnMaskLayer, labelMaskLayer] {
+            mask.contentsGravity = .resizeAspectFill
+            mask.backgroundColor = UIColor.white.cgColor   // show everything until masked
+        }
+        skySegmenter.onMask = { [weak self] cgMask in
+            self?.applySkyMask(cgMask)
+        }
+    }
+
+    /// Push a fresh sky mask onto both mask layers, sized to the current view bounds.
+    /// Disables implicit animation so the boundary tracks device motion crisply.
+    private func applySkyMask(_ cgMask: CGImage) {
+        guard skyMaskActive else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let bounds = scnView.bounds
+        scnMaskLayer.frame = bounds
+        scnMaskLayer.contents = cgMask
+        labelMaskLayer.frame = labelOverlay.bounds
+        labelMaskLayer.contents = cgMask
+        CATransaction.commit()
+    }
+
+    /// Engage or release sky-masking. Only meaningful in real-sky Live AR with a
+    /// bundled model; otherwise this is a no-op and the overlay is never clipped.
+    private func setSkyMasking(_ enabled: Bool) {
+        let shouldMask = enabled && skySegmenter.isAvailable
+        guard shouldMask != skyMaskActive else { return }
+        skyMaskActive = shouldMask
+
+        if shouldMask {
+            // Reset to fully-visible until the first frame is classified.
+            scnMaskLayer.contents = nil
+            labelMaskLayer.contents = nil
+            scnMaskLayer.frame = scnView.bounds
+            labelMaskLayer.frame = labelOverlay.bounds
+            scnView.layer.mask = scnMaskLayer
+            labelOverlay.layer.mask = labelMaskLayer
+            cameraPassthrough.onFrame = { [weak self] pixelBuffer in
+                self?.skySegmenter.process(pixelBuffer: pixelBuffer)
+            }
+        } else {
+            cameraPassthrough.onFrame = nil
+            scnView.layer.mask = nil
+            labelOverlay.layer.mask = nil
+        }
     }
 
     // MARK: - Lifecycle
@@ -197,6 +267,7 @@ final class SkySceneCoordinator: NSObject {
         arShowVirtualSky = virtualSky
 
         if !live {
+            setSkyMasking(false)
             cameraPassthrough.stop()
             skyDomeNode?.isHidden = false
             skyDomeNode?.opacity = 1.0
@@ -227,12 +298,17 @@ final class SkySceneCoordinator: NSObject {
                 skyDomeNode?.opacity = 0.6
                 setDomeHorizonClip(true)
                 labelOverlay.cullBelowHorizon = true
+                // App-sky provides its own (clipped) sky backdrop everywhere, so the
+                // camera-derived sky mask is not used here.
+                setSkyMasking(false)
             } else {
-                // Pure real sky → bodies only above the horizon.
+                // Pure real sky → bodies only above the horizon, AND only over real
+                // sky: the segmentation mask clips them off tents/buildings/ground.
                 skyDomeNode?.isHidden = true
                 skyDomeNode?.opacity = 1.0
                 setDomeHorizonClip(false)
                 labelOverlay.cullBelowHorizon = true
+                setSkyMasking(true)
             }
         }
         applyStarLOD()   // FOV just changed (virtual ↔ AR) → refresh the cutoff.
@@ -308,6 +384,7 @@ final class SkySceneCoordinator: NSObject {
     }
 
     func stop() {
+        setSkyMasking(false)
         displayLink?.invalidate()
         displayLink = nil
         scnView.isPlaying = false
@@ -668,15 +745,47 @@ final class SkySceneCoordinator: NSObject {
         }
     }
 
-    /// Tame a LIT model (Moon, planets): strip any baked-in emissive map that
-    /// would self-glow the surface to blown-out white, so the directional Sun
-    /// light alone shapes the craters/bands with proper contrast.
+    /// Tame a LIT model (Moon, planets): make every material MATTE so the
+    /// directional Sun shapes craters/bands with proper contrast and there is no
+    /// shiny white film from specular highlights or environment (IBL) reflection
+    /// off the imported PBR materials. (See CelestialBodyFactory.applyMatteSurface.)
     private static func calibrateLitModel(_ node: SCNNode) {
+        node.enumerateHierarchy { child, _ in
+            child.geometry?.materials.forEach { CelestialBodyFactory.applyMatteSurface(to: $0) }
+        }
+    }
+
+    /// Brightness applied to the Moon's diffuse texture so it reads on the map.
+    /// The lunar albedo map is a bright grey; shown at full value (even unlit) the
+    /// disc washes out and the camera bloom spreads it into a luminous white blob.
+    /// Scaling the diffuse down preserves ALL surface detail (the maria contrast is
+    /// a ratio) while bringing the overall level below the bloom threshold. Lower =
+    /// dimmer; tune here if the Moon still looks too bright or too dark.
+    private static let moonDiffuseBrightness: CGFloat = 0.38
+
+    /// The Moon: show the texture, not a glowing white disc. Render UNLIT (so the
+    /// directional Sun can't blow out the bright lunar albedo) and scale the diffuse
+    /// down to a calm level that stays below the bloom threshold. Surface detail is
+    /// fully preserved — it's a uniform multiply, not a clamp.
+    private static func calibrateMoon(_ node: SCNNode) {
         node.enumerateHierarchy { child, _ in
             guard let materials = child.geometry?.materials else { return }
             for material in materials {
+                material.lightingModel = .constant
                 material.emission.contents = nil
+                material.specular.contents = UIColor.black
+                material.reflective.contents = nil
+                material.diffuse.intensity = moonDiffuseBrightness
             }
+        }
+    }
+
+    /// The Sun keeps its authored look — we only drop any baked emissive map that
+    /// would double-expose it to flat white. Deliberately does NOT change the
+    /// lighting model, so the Sun's existing (good) appearance is preserved.
+    private static func stripEmission(_ node: SCNNode) {
+        node.enumerateHierarchy { child, _ in
+            child.geometry?.materials.forEach { $0.emission.contents = nil }
         }
     }
 
@@ -766,8 +875,18 @@ final class SkySceneCoordinator: NSObject {
                     // plane obliquely toward the user (no tumbling).
                     Self.makeModelUnlit(model)
                     model.eulerAngles = SCNVector3(-Float.pi * 0.13, 0, 0)
+                } else if b.object.type == .sun {
+                    // The Sun already looks good — leave its authored look intact,
+                    // only dropping any baked emissive that would blow it to white.
+                    Self.stripEmission(model)
+                } else if b.object.type == .moon {
+                    // The Moon's albedo is bright grey; even unlit at full value it
+                    // washes out and blooms. calibrateMoon renders it unlit AND scales
+                    // the diffuse down so the maria texture reads clearly on the map.
+                    Self.calibrateMoon(model)
                 } else {
-                    // Strip baked emissive so the Sun light shapes the surface.
+                    // Planets: matte the imported PBR so the directional Sun shapes
+                    // the surface with no shiny white film / IBL reflection.
                     Self.calibrateLitModel(model)
                 }
 

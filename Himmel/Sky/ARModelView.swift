@@ -256,6 +256,17 @@ final class ARModelViewController: UIViewController, ARSessionDelegate, ARCoachi
         guard let scene = try? SCNScene(url: modelURL, options: [.convertToYUp: true]) else { return }
         let node = SCNNode()
         for child in scene.rootNode.childNodes { node.addChildNode(child) }
+
+        // Tame the imported PBR so ARKit's automatic environment probe (IBL)
+        // can't paint a shiny white film over the body. Matches the star-map
+        // treatment: the Sun keeps its authored emissive look; everything else
+        // becomes matte so the texture reads true under the AR environment light.
+        if object?.type != .sun {
+            node.enumerateHierarchy { child, _ in
+                child.geometry?.materials.forEach { CelestialBodyFactory.applyMatteSurface(to: $0) }
+            }
+        }
+
         modelTemplate = node
     }
 

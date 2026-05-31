@@ -29,6 +29,31 @@ final class CameraPassthrough {
     private let sessionQueue = DispatchQueue(label: "himmel.camera.session")
     private var isConfigured = false
 
+    /// Live-frame tap for analysis (sky segmentation). Set to a handler to receive
+    /// rear-camera frames as `CVPixelBuffer`s, already rotated to PORTRAIT and in
+    /// 32BGRA; set back to `nil` to stop the delivery cost. Called on a private
+    /// queue, never the main thread. Independent of the on-screen preview layer.
+    var onFrame: ((CVPixelBuffer) -> Void)? {
+        get { frameDelegate.onFrame }
+        set { frameDelegate.onFrame = newValue }
+    }
+
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let videoQueue = DispatchQueue(label: "himmel.camera.video")
+    private let frameDelegate = FrameDelegate()
+
+    /// Forwards sample buffers to `onFrame` as bare pixel buffers. Kept as a tiny
+    /// NSObject so `CameraPassthrough` itself need not inherit from NSObject.
+    private final class FrameDelegate: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+        var onFrame: ((CVPixelBuffer) -> Void)?
+        func captureOutput(_ output: AVCaptureOutput,
+                           didOutput sampleBuffer: CMSampleBuffer,
+                           from connection: AVCaptureConnection) {
+            guard let onFrame, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            onFrame(pb)
+        }
+    }
+
     init() {
         previewView.previewLayer.videoGravity = .resizeAspectFill
         previewView.previewLayer.session = session
@@ -93,11 +118,30 @@ final class CameraPassthrough {
         } else {
             NSLog("[Himmel] Live AR: no usable rear camera input.")
         }
+
+        // Frame tap for analysis (sky segmentation). Late frames are dropped so the
+        // segmenter never queues up behind a slow inference. 32BGRA is what Vision /
+        // Core Image consume most cheaply.
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.setSampleBufferDelegate(frameDelegate, queue: videoQueue)
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+        }
         session.commitConfiguration()
     }
 
     private func applyPortraitOrientation() {
-        guard let connection = previewView.previewLayer.connection else { return }
+        // Rotate BOTH the on-screen preview and the analysis frames to portrait, so
+        // the segmentation mask lines up 1:1 with what the user sees.
+        rotateToPortrait(previewView.previewLayer.connection)
+        rotateToPortrait(videoOutput.connection(with: .video))
+    }
+
+    private func rotateToPortrait(_ connection: AVCaptureConnection?) {
+        guard let connection else { return }
         if #available(iOS 17.0, *) {
             if connection.isVideoRotationAngleSupported(90) {
                 connection.videoRotationAngle = 90   // portrait

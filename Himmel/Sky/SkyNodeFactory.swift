@@ -51,6 +51,17 @@ enum SkyNodeFactory {
         container.constraints = [billboard()]
         container.renderingOrder = 50
 
+        // Planets fall back to a SOLID colour globe (not an additive glow sprite):
+        // bodies without a bundled hero .usdz (Uranus, Neptune) otherwise rendered
+        // as a bloom-blown white blob. A `.constant` disc in the planet's colour
+        // reads as a clean, dim planet and never saturates. Planets that DO have a
+        // model show this only for the instant before the textured model swaps in.
+        if resolved.object.type == .planet {
+            let r = CGFloat(planetSize(for: resolved.object.name)) * 0.42
+            container.addChildNode(makePlanetGlobe(named: resolved.object.name, radius: r))
+            return container
+        }
+
         let (sprite, size): (UIImage, CGFloat)
         switch resolved.object.type {
         case .sun:
@@ -62,9 +73,6 @@ enum SkyNodeFactory {
                 waxing: (moonPhase?.age ?? 0) < 14.77
             )
             size = 5.0
-        case .planet:
-            sprite = SpriteCache.planet(named: resolved.object.name)
-            size = planetSize(for: resolved.object.name)
         default:
             sprite = SpriteCache.starGlow(tint: .white, bright: true)
             size = 3.0
@@ -305,6 +313,41 @@ enum SkyNodeFactory {
         let b = SCNBillboardConstraint()
         b.freeAxes = .all
         return b
+    }
+
+    /// A flat, solid-colour planet disc for bodies without a bundled hero model.
+    /// `.constant` shading shows the colour at its true value — no directional
+    /// light multiplication, so it can never bloom out to white.
+    private static func makePlanetGlobe(named name: String, radius: CGFloat) -> SCNNode {
+        let sphere = SCNSphere(radius: radius)
+        sphere.segmentCount = 48
+        sphere.isGeodesic = false
+
+        let mat = SCNMaterial()
+        mat.diffuse.contents = planetBaseColor(named: name)
+        mat.lightingModel = .constant
+        mat.metalness.contents = 0.0
+        mat.roughness.contents = 1.0
+        mat.specular.contents = UIColor.black
+        mat.emission.contents = nil
+        sphere.firstMaterial = mat
+
+        return SCNNode(geometry: sphere)
+    }
+
+    /// Representative surface colour per planet (moderate reflectances, opaque) for
+    /// the solid-disc fallback. Kept slightly muted so the disc stays a calm dot.
+    private static func planetBaseColor(named name: String) -> UIColor {
+        switch name {
+        case "Mercury": return UIColor(red: 0.62, green: 0.58, blue: 0.52, alpha: 1)
+        case "Venus":   return UIColor(red: 0.85, green: 0.78, blue: 0.58, alpha: 1)
+        case "Mars":    return UIColor(red: 0.78, green: 0.34, blue: 0.22, alpha: 1)
+        case "Jupiter": return UIColor(red: 0.80, green: 0.66, blue: 0.48, alpha: 1)
+        case "Saturn":  return UIColor(red: 0.80, green: 0.71, blue: 0.52, alpha: 1)
+        case "Uranus":  return UIColor(red: 0.55, green: 0.78, blue: 0.82, alpha: 1)
+        case "Neptune": return UIColor(red: 0.30, green: 0.42, blue: 0.78, alpha: 1)
+        default:        return UIColor(red: 0.60, green: 0.60, blue: 0.62, alpha: 1)
+        }
     }
 
     private static func makeAdditiveMaterial(image: UIImage) -> SCNMaterial {

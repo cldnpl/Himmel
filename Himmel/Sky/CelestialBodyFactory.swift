@@ -55,18 +55,13 @@ enum CelestialBodyFactory {
             mat.emission.contents = diffuse
             mat.writesToDepthBuffer = true
         } else {
-            // Lit body — relief from the normal map, glints from the specular map.
-            mat.lightingModel = .blinn
+            // Matte lit body — relief from the normal map, but NO specular glint
+            // or environment reflection (planets/the Moon are not glossy).
             if let normal = UIImage(named: "tex_\(key)_normal") {
                 mat.normal.contents = normal
                 mat.normal.intensity = 0.85
             }
-            if let specular = UIImage(named: "tex_\(key)_specular") {
-                mat.specular.contents = specular
-                mat.shininess = 0.35
-            } else {
-                mat.specular.contents = UIColor(white: 0.06, alpha: 1.0)
-            }
+            applyMatteSurface(to: mat)
             mat.writesToDepthBuffer = true
         }
         sphere.firstMaterial = mat
@@ -88,6 +83,25 @@ enum CelestialBodyFactory {
         }
 
         return container
+    }
+
+    // MARK: - Matte surface
+
+    /// Make a body material MATTE: pure diffuse response, no specular highlight
+    /// and no environment (image-based) reflection. This is what removes the
+    /// "shiny plastic / white luminous film" from lit planets and the Moon —
+    /// both on the star map and in AR, where ARKit's automatic environment probe
+    /// would otherwise reflect off the imported PBR (`.physicallyBased`)
+    /// materials. The diffuse colour and normal/relief maps are left intact.
+    ///
+    /// Do NOT call this on the Sun: it must stay emissive `.constant`.
+    static func applyMatteSurface(to material: SCNMaterial) {
+        material.lightingModel = .lambert          // diffuse only — no specular term
+        material.metalness.contents = 0.0          // neutralize any imported PBR metal
+        material.roughness.contents = 1.0          // fully rough → no sharp reflection
+        material.specular.contents = UIColor.black // belt-and-suspenders for blinn/phong
+        material.reflective.contents = nil         // no environment mirror / IBL sheen
+        material.emission.contents = nil           // no self-glow / double-exposure
     }
 
     // MARK: - Ring
