@@ -640,6 +640,7 @@ private final class SnapshotPreviewViewController: UIViewController {
     private let imageContainer = UIView()
     private let saveButton = UIButton(type: .system)
     private let shareButton = UIButton(type: .system)
+    private var didSave = false
 
     init(image: UIImage, object: CelestialObject?) {
         self.image = image
@@ -664,20 +665,7 @@ private final class SnapshotPreviewViewController: UIViewController {
     // MARK: Layout (HIG-compliant)
 
     private func buildLayout() {
-        // ── Native-style top bar: Cancel (X) · title · Save (checkmark) ──────
-        let cancel = UIButton(type: .system)
-        cancel.setImage(UIImage(systemName: "xmark"), for: .normal)
-        cancel.tintColor = .systemBlue
-        cancel.accessibilityLabel = "Cancel"
-        cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
-        cancel.translatesAutoresizingMaskIntoConstraints = false
-
-        saveButton.setImage(UIImage(systemName: "checkmark"), for: .normal)
-        saveButton.tintColor = .systemBlue
-        saveButton.accessibilityLabel = "Save to Photos"
-        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
-        saveButton.translatesAutoresizingMaskIntoConstraints = false
-
+        // ── Centered title ──────────────────────────────────────────────────
         let title = UILabel()
         title.text = "Snapshot"
         title.font = .systemFont(ofSize: 17, weight: .semibold)
@@ -685,15 +673,20 @@ private final class SnapshotPreviewViewController: UIViewController {
         title.textAlignment = .center
         title.translatesAutoresizingMaskIntoConstraints = false
 
-        // ── Clean floating preview (rounded, subtle shadow, no border) ──────
+        // ── Snapshot card ───────────────────────────────────────────────────
+        // Shown at the snapshot's TRUE aspect ratio with .scaleAspectFit, so
+        // the 3D model reads at exactly the size it was captured. (The old
+        // .scaleAspectFill cropped the tall AR frame into a square card, which
+        // zoomed into the centre and made the model look blown-up.)
         imageView.image = image
-        imageView.contentMode = .scaleAspectFill
+        imageView.contentMode = .scaleAspectFit
         imageView.clipsToBounds = true
-        imageView.layer.cornerRadius = 18
+        imageView.layer.cornerRadius = 22
         imageView.layer.cornerCurve = .continuous
         imageView.translatesAutoresizingMaskIntoConstraints = false
 
-        imageContainer.layer.cornerRadius = 18
+        imageContainer.backgroundColor = .clear
+        imageContainer.layer.cornerRadius = 22
         imageContainer.layer.cornerCurve = .continuous
         imageContainer.layer.shadowColor = UIColor.black.cgColor
         imageContainer.layer.shadowOpacity = 0.18
@@ -702,56 +695,105 @@ private final class SnapshotPreviewViewController: UIViewController {
         imageContainer.translatesAutoresizingMaskIntoConstraints = false
         imageContainer.addSubview(imageView)
 
-        // ── Floating Share button (directly below the snapshot card) ────────
-        // NOTE: ALL textual metadata (Phase, Illumination, distance, etc.) is
-        // intentionally removed — the snapshot itself is the sole focus.
-        var shareConfig = UIButton.Configuration.filled()
-        shareConfig.title = "Share"
-        shareConfig.image = UIImage(systemName: "square.and.arrow.up")
-        shareConfig.imagePadding = 8
-        shareConfig.baseBackgroundColor = .systemBlue
-        shareConfig.cornerStyle = .capsule
-        shareButton.configuration = shareConfig
-        shareButton.accessibilityLabel = "Share"
-        shareButton.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
-        shareButton.translatesAutoresizingMaskIntoConstraints = false
+        // ── Two equal action buttons (Save · Share), iOS-native styling ─────
+        configureSaveButton()
+        configureShareButton()
 
-        [cancel, title, saveButton, imageContainer, shareButton].forEach(view.addSubview)
+        let buttonRow = UIStackView(arrangedSubviews: [saveButton, shareButton])
+        buttonRow.axis = .horizontal
+        buttonRow.distribution = .fillEqually
+        buttonRow.spacing = 14
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+
+        [title, imageContainer, buttonRow].forEach(view.addSubview)
+
+        // Layout strategy: pin the title to the top and the buttons to the
+        // bottom, then let the photo card fill ONLY the space between them while
+        // keeping the snapshot's exact aspect ratio. Because the card preserves
+        // the capture's proportions and is shown with .scaleAspectFit, the 3D
+        // model appears at exactly the size it had when the shutter was pressed —
+        // never cropped or zoomed — and the whole sheet always fits the screen.
+        let safe = view.safeAreaLayoutGuide
+        let aspect = image.size.height > 0 ? image.size.width / image.size.height : 0.5
+
+        // A guide spanning the gap between the title and the buttons; the card
+        // is centred inside it.
+        let gapGuide = UILayoutGuide()
+        view.addLayoutGuide(gapGuide)
+
+        // "Grow" constraints: try to make the card as large as the available
+        // box allows. They yield to the required caps below, so the card fills
+        // the space without ever overflowing it.
+        let growWidth = imageContainer.widthAnchor.constraint(equalTo: view.widthAnchor, constant: -48)
+        growWidth.priority = .defaultHigh
+        let growHeight = imageContainer.heightAnchor.constraint(equalTo: gapGuide.heightAnchor)
+        growHeight.priority = .defaultLow
 
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
+            title.topAnchor.constraint(equalTo: safe.topAnchor, constant: 16),
             title.centerXAnchor.constraint(equalTo: view.centerXAnchor),
 
-            cancel.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            cancel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            buttonRow.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -20),
+            buttonRow.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            buttonRow.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            buttonRow.heightAnchor.constraint(equalToConstant: 52),
 
-            saveButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            saveButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            gapGuide.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 20),
+            gapGuide.bottomAnchor.constraint(equalTo: buttonRow.topAnchor, constant: -24),
 
-            // Snapshot card — the absolute centre of attention.
-            imageContainer.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 24),
-            imageContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
-            imageContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            imageContainer.heightAnchor.constraint(equalTo: view.heightAnchor, multiplier: 0.58),
+            // Card keeps the capture's aspect ratio, stays centred in the gap,
+            // and is bounded by the gap and the screen edges.
+            imageContainer.widthAnchor.constraint(equalTo: imageContainer.heightAnchor, multiplier: aspect),
+            imageContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            imageContainer.centerYAnchor.constraint(equalTo: gapGuide.centerYAnchor),
+            imageContainer.topAnchor.constraint(greaterThanOrEqualTo: gapGuide.topAnchor),
+            imageContainer.bottomAnchor.constraint(lessThanOrEqualTo: gapGuide.bottomAnchor),
+            imageContainer.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+            imageContainer.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+            growWidth,
+            growHeight,
 
             imageView.topAnchor.constraint(equalTo: imageContainer.topAnchor),
             imageView.leadingAnchor.constraint(equalTo: imageContainer.leadingAnchor),
             imageView.trailingAnchor.constraint(equalTo: imageContainer.trailingAnchor),
-            imageView.bottomAnchor.constraint(equalTo: imageContainer.bottomAnchor),
-
-            // Share floats directly below the card.
-            shareButton.topAnchor.constraint(equalTo: imageContainer.bottomAnchor, constant: 28),
-            shareButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            shareButton.widthAnchor.constraint(equalToConstant: 200),
-            shareButton.heightAnchor.constraint(equalToConstant: 52)
+            imageView.bottomAnchor.constraint(equalTo: imageContainer.bottomAnchor)
         ])
+    }
+
+    private func configureSaveButton() {
+        var config = UIButton.Configuration.filled()
+        config.title = "Save"
+        config.image = UIImage(systemName: "square.and.arrow.down")
+        config.imagePadding = 8
+        config.baseBackgroundColor = .systemBlue
+        config.baseForegroundColor = .white
+        config.cornerStyle = .capsule
+        saveButton.configuration = config
+        saveButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        saveButton.accessibilityLabel = "Save to Photos"
+        saveButton.addTarget(self, action: #selector(saveTapped), for: .touchUpInside)
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    private func configureShareButton() {
+        var config = UIButton.Configuration.tinted()
+        config.title = "Share"
+        config.image = UIImage(systemName: "square.and.arrow.up")
+        config.imagePadding = 8
+        config.baseBackgroundColor = .systemBlue
+        config.baseForegroundColor = .systemBlue
+        config.cornerStyle = .capsule
+        shareButton.configuration = config
+        shareButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        shareButton.accessibilityLabel = "Share"
+        shareButton.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
+        shareButton.translatesAutoresizingMaskIntoConstraints = false
     }
 
     // MARK: Actions
 
-    @objc private func cancelTapped() { dismiss(animated: true) }
-
     @objc private func saveTapped() {
+        guard !didSave else { return }
         saveButton.isEnabled = false
         photoSaver.save(image) { [weak self] result in
             DispatchQueue.main.async {
@@ -759,9 +801,13 @@ private final class SnapshotPreviewViewController: UIViewController {
                 self.saveButton.isEnabled = true
                 switch result {
                 case .success:
+                    self.didSave = true
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    self.saveButton.setImage(UIImage(systemName: "checkmark.circle.fill"), for: .normal)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.dismiss(animated: true) }
+                    var config = self.saveButton.configuration
+                    config?.title = "Saved"
+                    config?.image = UIImage(systemName: "checkmark")
+                    config?.baseBackgroundColor = .systemGreen
+                    self.saveButton.configuration = config
                 case .denied:
                     self.showAlert(title: "Photos Access Needed", message: "Allow photo access in Settings to save this snapshot.")
                 case .failure:
@@ -772,13 +818,6 @@ private final class SnapshotPreviewViewController: UIViewController {
     }
 
     @objc private func shareTapped() {
-        // Immediate tactile/visual feedback so the tap never feels "dead".
-        UIView.animate(withDuration: 0.08, animations: {
-            self.shareButton.transform = CGAffineTransform(scaleX: 0.96, y: 0.96)
-        }, completion: { _ in
-            UIView.animate(withDuration: 0.12) { self.shareButton.transform = .identity }
-        })
-
         // Present on the NEXT main-runloop tick and feed the image through a
         // lazy UIActivityItemProvider (its `item` is fetched off the main thread
         // by the system), so building the share sheet never blocks the UI.
